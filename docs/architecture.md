@@ -384,6 +384,53 @@ Two further consequences worth keeping:
   sorts on that. Both columns are shown, because where they disagree is
   informative.
 
+### Measured — pull is not visible to the accelerometer (negative result)
+
+Recorded because it cost real effort and the idea is tempting enough to be worth
+re-proposing. `Pull` is planned as a vision feature; the question was whether the
+IMU could get there first, since the rides where Orbit works hardest are the
+older GPS-less ones that currently rank worst.
+
+The hypothesis: `rough` band-passes 5–40 Hz, so the 0.5–5 Hz band is unused, and
+pedalling (~1.2–1.7 Hz) and a dog's stride (~2–3.5 Hz) sit at different
+frequencies. A hard pull should raise stride-band power while pedal-band power
+falls.
+
+Tested on ride 0603 against two moments identified from the footage — hard pull
+from 0:41, slack line at 11:55. It fails three ways at once:
+
+- **The slack window reads at the 65th percentile of the ride** — *above* median
+  stride share. A pull detector must read low where the line is slack.
+- **Stride share correlates −0.585 with chatter share.** Shares sum to one, so
+  a band containing nothing periodic simply takes whatever the broadband trail
+  noise leaves. It is a roundabout roughness meter.
+- **Nothing in 0.5–8 Hz is periodic at all.** The strongest peak holds 3.4% of
+  band power; a fixture with a genuine planted stride tone puts 19.7% in its
+  peak — 5.8× more prominent.
+
+The physics agrees in hindsight. A taut line transmits a roughly *steady* force,
+and steady force is indistinguishable from a small change in gravity to an
+accelerometer. A slack line transmits nothing. There is no periodic component to
+find, because a bike does not bob at the dog's stride frequency the way a
+runner's harness would.
+
+Two consequences:
+
+- `Pull` stays behind vision — Orbit's apparent size for lead distance — as
+  originally planned.
+- **Ride 0603 cannot be ranked correctly by any telemetry feature.** On a
+  bikejoring ride the dog sets the pace, so speed captures it — and the newer
+  bikejoring rides do have GPS. 0603 is one of the ten shot without it, so the
+  camera recorded nothing about how fast it was going. That ride waits for
+  vision specifically, not for better weights.
+
+The method generalises past this case: two windows compared for a difference are
+only meaningful if they match on everything *except* that difference. The first
+attempt compared a pre-ride standstill against a ride (total power 3,939× apart)
+and the second compared a launch-from-standstill against coasting, which
+measured pedalling. Both produced confident-looking band tables. A power-ratio
+guard now refuses the first; only naming the confound catches the second.
+
 ## Stage 3 — Cut
 
 Naïve top-N gives five near-identical clips from one rowdy section. Three constraints beyond
