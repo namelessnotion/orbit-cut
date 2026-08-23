@@ -1,0 +1,37 @@
+# --- footage and derived data: never commit any of this ----------------------
+# A stray `git add .` in a video project is how you try to commit 40 GB.
+*.MP4
+*.mp4
+*.MOV
+*.mov
+*.LRV
+*.lrv
+*.THM
+*.thm
+*.parquet
+*.csv
+
+derived/
+renders/
+inbox/
+originals/
+
+# --- database ----------------------------------------------------------------
+*.db
+*.db-wal
+*.db-shm
+
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# --- local ---------------------------------------------------------------------
+.env
+.DS_Store
