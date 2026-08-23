@@ -29,27 +29,28 @@ PROXY_BITRATE = os.environ.get("ORBITCUT_PROXY_BITRATE", "2M")
 # redo only that stage rather than everything.
 STAGE_VERSIONS = {
     "probe": 1,
-    "telemetry": 2,
+    # 2: GPS column naming fixed (telemetrik's GPS5 is 7 fields, not 5).
+    # 3: GPS parsed in-tree by gps.py. Versions 1 and 2 have no usable speed,
+    #    altitude or cornering force — v1 had no GPS columns at all, v2 had
+    #    them scaled by the latitude divisor, which zeroed them.
+    "telemetry": 4,
     "proxy": 1,
     "thumbs": 1,
-    "score": 1,
+    # 2: descent is a windowed slope fit, not a difference between adjacent
+    #    seconds. The old one measured GPS altitude noise (correlation 0.26
+    #    with real descent) and fed it 14% of the composite.
+    "score": 2,
     "archive": 1,
 }
 
 # --- telemetry ---------------------------------------------------------------
 RESAMPLE_HZ = 10.0  # the common grid every scorer reads
-STREAMS = [
-    "ACCL",
-    "GYRO",
-    "GPS5",
-    "GRAV",
-    "CORI",
-    "IORI",
-    "SHUT",
-    "ISOE",
-    "WBAL",
-    "TMPC",
-]
+# GPS is deliberately absent from this list. Both GPS5 and GPS9 are parsed by
+# `gps.py` instead: telemetrik returns GPS9 as raw bytes (it is a complex type)
+# and mis-scales GPS5 (it reads one SCAL divisor and applies it to all five
+# fields). Asking for them here only produces a confusing error before the
+# working path runs.
+STREAMS = ["ACCL", "GYRO", "GRAV", "CORI", "IORI", "SHUT", "ISOE", "WBAL", "TMPC"]
 
 VIDEO_SUFFIXES = {".mp4", ".MP4", ".mov", ".MOV", ".lrv", ".LRV"}
 

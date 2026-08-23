@@ -30,6 +30,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.ndimage import median_filter
 from scipy.signal import butter, sosfiltfilt
 
 from . import config
@@ -45,7 +46,41 @@ AIR_LANDING_G = 18.0     # m/s^2 — a landing spike must follow, or it wasn't a
 AIR_LANDING_WINDOW = 0.6 # seconds after touchdown to look for that spike
 
 ROUGH_BAND = (5.0, 40.0)  # Hz — chatter and impacts, above body movement
-STAGE_VERSION = 1
+
+# --- descent ---------------------------------------------------------------
+# GPS altitude is the least accurate thing a GoPro records: metres of noise per
+# sample, plus outright jumps when the receiver re-locks. Differencing adjacent
+# seconds — the obvious way to get a rate of descent — amplifies exactly that,
+# and measured against a simulated Michigan profile it correlated 0.26 with the
+# real descent while reporting peaks 24x too large.
+#
+# The separation that makes this fixable: altitude noise is per-sample, and a
+# trail descent lasts tens of seconds. So take the slope over a window instead
+# of the difference between neighbours, after a median filter to remove the
+# jumps. That lifts the correlation to ~0.9 on the same profile.
+#
+# The window is a trade. Longer is cleaner and blurs short descents; 21 s keeps
+# a useful signal-to-noise ratio on an 8 s drop and roughly triples it on a
+# long one.
+ALT_MEDIAN_S = 9         # kills re-lock jumps without touching real slopes
+GRADE_WINDOW_S = 21      # seconds of slope fit
+GPS_DOP_MAX = 6.0        # dilution of precision above this is not a fix worth using
+
+# Even after the slope fit, altitude keeps producing impossible descents: a
+# median filter removes spikes, but a receiver re-lock is a *step*, and a 44 m
+# step through a 21 s slope window reads as 3.2 m/s of descent. There is no
+# filter that separates a real step from a fake one.
+#
+# So bound it by physics instead. You cannot descend faster than you are
+# travelling, and a rideable trail tops out near a 30% gradient. Seconds that
+# violate that are seconds where the altitude is wrong, and the honest value
+# for them is "unknown", not a clipped number that piles up at the limit.
+#
+# This bites hardest exactly where the altitude is worst — stationary, under
+# canopy, receiver re-acquiring — because the bound scales with speed.
+MAX_GRADIENT = 0.60      # rise/run; ~31 degrees, far past anything rideable
+MAX_DESCENT_MS = 3.0     # absolute fallback when speed is unknown
+STAGE_VERSION = 3
 
 
 def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
@@ -129,6 +164,56 @@ def yaw_rate(tel: pd.DataFrame) -> np.ndarray:
     return np.abs((w * g).sum(axis=1))
 
 
+def descent_rate(alt: np.ndarray) -> np.ndarray:
+    """Metres per second of descent, positive downhill.
+
+    Least-squares slope over a centred window. With evenly spaced samples that
+    reduces to one convolution with k / sum(k^2), which is both exact and cheap
+    — no loop over windows and no curve fitting.
+    """
+    good = np.isfinite(alt)
+    if good.sum() < max(GRADE_WINDOW_S, 5):
+        return np.full(len(alt), np.nan)
+
+    # Bridge short gaps so the filter sees an evenly spaced series; seconds that
+    # had no altitude are put back to NaN at the end.
+    idx = np.arange(len(alt), dtype=float)
+    filled = np.interp(idx, idx[good], alt[good])
+    filled = median_filter(filled, size=ALT_MEDIAN_S, mode="nearest")
+
+    half = GRADE_WINDOW_S // 2
+    k = np.arange(-half, half + 1, dtype=float)
+    kernel = (k / (k ** 2).sum())[::-1]
+    slope = np.convolve(np.pad(filled, half, mode="edge"), kernel, mode="valid")
+
+    out = -slope[:len(alt)]        # descending is positive
+    out[~good] = np.nan
+    return out
+
+
+def bound_by_speed(grade: np.ndarray, speed: np.ndarray) -> tuple[np.ndarray, float]:
+    """Blank descents the rider's own speed says are impossible.
+
+    Returns the bounded grade and the fraction of known seconds rejected. That
+    fraction is worth surfacing: a few percent is ordinary GPS, while a large
+    number means the altitude is unusable on that ride and `grade` should not be
+    trusted there at all.
+    """
+    out = np.asarray(grade, dtype=float).copy()
+    known = np.isfinite(out)
+    if not known.any():
+        return out, 0.0
+
+    limit = np.where(np.isfinite(speed), np.abs(speed) * MAX_GRADIENT,
+                     MAX_DESCENT_MS)
+    # A stationary rider can still drift a little; never bound below a floor, or
+    # every second of a pause becomes NaN on GPS jitter alone.
+    limit = np.maximum(limit, 0.35)
+    bad = known & (np.abs(out) > limit)
+    out[bad] = np.nan
+    return out, float(bad.sum() / max(known.sum(), 1))
+
+
 def compute(telemetry_path: str, imu_path: str | None, duration_s: float) -> pd.DataFrame:
     """One row per second of the ride. Raw physical units throughout."""
     tel = pd.read_parquet(telemetry_path)
@@ -162,14 +247,35 @@ def compute(telemetry_path: str, imu_path: str | None, duration_s: float) -> pd.
     speed = on_grid("gps_speed2d")
     # A stationary GoPro still reports a metre or two per second of GPS noise.
     speed = np.where(np.isfinite(speed) & (speed >= 0) & (speed < 30), speed, np.nan)
+
+    # Drop the seconds before the receiver had a lock — they read as a slow
+    # crawl across the county, which is exactly the wrong thing to average in.
+    #
+    # Only when the stream actually reports a lock somewhere. GPS5's fix is
+    # sticky metadata and can be absent altogether, in which case the parser
+    # reports 0 for the whole ride: a fix field that never says yes is a field
+    # we cannot trust, not a ride that never got GPS. Failing open here means a
+    # missing fix costs nothing; failing closed would silently discard the GPS
+    # of every camera that does not record GPSF.
+    fix = on_grid("gps_fix")
+    if np.isfinite(fix).any() and np.nanmax(fix) >= 2:
+        speed = np.where(fix >= 1.5, speed, np.nan)     # 2 = 2D lock, 3 = 3D
     out["speed_ms"] = speed
 
     alt = on_grid("gps_alt")
-    if np.isfinite(alt).any():
-        smooth = pd.Series(alt).rolling(5, center=True, min_periods=2).mean().to_numpy()
-        out["grade"] = -np.gradient(smooth)     # positive = descending
-    else:
-        out["grade"] = np.nan
+    if np.isfinite(fix).any() and np.nanmax(fix) >= 2:
+        # Altitude is the least trustworthy GPS field there is; without a lock
+        # it is not noisy, it is fiction, and `grade` differentiates it.
+        alt = np.where(fix >= 1.5, alt, np.nan)
+    # GPS9 reports dilution of precision per sample. A high DOP is the receiver
+    # telling you the fix is geometrically weak, which is where the altitude
+    # jumps come from — so drop those seconds rather than filtering them later.
+    dop = on_grid("gps_dop")
+    if np.isfinite(dop).any():
+        alt = np.where(np.isfinite(dop) & (dop > GPS_DOP_MAX), np.nan, alt)
+    grade, rejected = bound_by_speed(descent_rate(alt), speed)
+    out["grade"] = grade
+    out.attrs["grade_rejected"] = rejected
 
     # Cornering force is what actually looks fast on screen: a hard turn at
     # speed, not a slow one. Without GPS this stays NaN and the composite

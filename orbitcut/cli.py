@@ -22,6 +22,11 @@ from . import (calibrate as cal_mod, config, db, hashing, ingest, overlay as ov_
                probe as probe_mod, score as score_mod, telemetry as tel_mod)
 
 
+# Clip length the ranking assumes, in seconds. Stage 3 targets 7-20 s biased to
+# 8-15; 12 sits in the middle of that and is what "best clip" means here.
+CLIP_S = 12
+
+
 def _dependencies() -> list[tuple[str, bool, str]]:
     """(name, installed, note) for every declared dependency."""
     from importlib.metadata import PackageNotFoundError, requires, version
@@ -46,6 +51,22 @@ def _dependencies() -> list[tuple[str, bool, str]]:
 # --------------------------------------------------------------------- doctor
 def cmd_doctor(_args) -> int:
     ok = True
+
+    # Which code is running, and from where. Trivial to print and it settles a
+    # question that is otherwise pure guesswork: a command that reports an
+    # option it does not have, or output in an old format, almost always means
+    # the edits landed somewhere other than the copy on the path. An editable
+    # install points into the repo; a plain one points into site-packages and
+    # will happily ignore every change you make.
+    import orbitcut
+    pkg = Path(orbitcut.__file__).parent
+    print(f"  ok    orbitcut {orbitcut.__version__}")
+    print(f"        {pkg}")
+    if "site-packages" in str(pkg):
+        print("  warn  running from site-packages, not your repo — edits to the")
+        print("        working tree will not take effect. Reinstall editable:")
+        print("            pip install -e .")
+    print()
 
     # Which interpreter is actually running matters more than it looks: a venv
     # built with `python3` instead of pyenv's `python` shim lands on the wrong
@@ -135,6 +156,25 @@ def cmd_verify(args) -> int:
         print(f"    GPS fix           {fix * 100:.0f}%          {verdict}")
         if tel.get("gps_lat"):
             print(f"    location          {tel['gps_lat']:.5f}, {tel['gps_lon']:.5f}")
+        locked = tel.get("gps_locked_fraction")
+        if locked is not None:
+            print(f"    GPS lock          {locked * 100:.0f}%          "
+                  f"{'ok' if locked > 0.8 else 'partial — early seconds dropped'}")
+        p50, p95 = tel.get("gps_speed_p50"), tel.get("gps_speed_p95")
+        if p50 is not None:
+            verdict = "ok" if 0.5 < p95 < 20 else "SUSPECT — not riding speeds"
+            print(f"    speed p50/p95     {p50 * 3.6:.1f} / {p95 * 3.6:.1f} km/h  {verdict}")
+
+    # The stream is present but its fields did not survive extraction. This is
+    # the exact shape of the GPS5-arity bug, so name it rather than leave three
+    # sub-scores quietly empty.
+    if any(k in tel["streams"] for k in ("GPS5", "GPS9")) and tel.get("gps_lat") is None:
+        print("\n  GPS STREAM PRESENT BUT NO USABLE COLUMNS.")
+        print("    The camera wrote location data and this pipeline did not read it,")
+        print("    which costs speed, descent and cornering force on every ride.")
+        print("    Re-extract:  orbitcut ingest <file> --force")
+        print("    If it persists, the parser's field layout has changed — check for")
+        print("    a `! GPS5: N fields` warning during ingest.")
 
     gm = tel.get("gravity_mean")
     if gm:
@@ -196,22 +236,265 @@ def cmd_ingest(args) -> int:
         print(f"no video files under {args.path}")
         return 1
 
-    print(f"{len(files)} file(s)\n")
+    jobs = max(1, getattr(args, "jobs", 1) or 1)
+    print(f"{len(files)} file(s)" + (f", {jobs} at a time" if jobs > 1 else "") + "\n")
     failed = 0
-    for i, path in enumerate(files, 1):
+
+    def report(i: int, path: Path, result: dict) -> int:
         gb = path.stat().st_size / 1e9
         print(f"[{i}/{len(files)}] {path.name}  ({gb:.1f} GB)")
-        result = ingest.ingest_one(path, conn, force=args.force)
+        bad = 0
         for stage, status in result["stages"].items():
             marker = "!" if status.startswith("error") else " "
             print(f"    {marker} {stage:10s} {status}")
-            if status.startswith("error"):
-                failed += 1
+            bad += status.startswith("error")
         print()
+        return bad
+
+    if jobs == 1:
+        for i, path in enumerate(files, 1):
+            failed += report(i, path, ingest.ingest_one(path, conn, force=args.force))
+    else:
+        # Threads, not processes: the expensive stage is an ffmpeg subprocess,
+        # which holds no GIL, and threads can share the database file through
+        # WAL without the marshalling a process pool would need. The honest
+        # caveat is that telemetry parsing is pure Python and *does* hold the
+        # GIL, so if `orbitcut timing` says telemetry dominates, expect less
+        # from this than the job count suggests.
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        local = threading.local()
+
+        def run(i: int, path: Path):
+            if not hasattr(local, "conn"):
+                local.conn = db.connect()
+            return i, path, ingest.ingest_one(path, local.conn, force=args.force)
+
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(run, i, p) for i, p in enumerate(files, 1)]
+            for fut in as_completed(futures):
+                i, path, result = fut.result()
+                failed += report(i, path, result)
 
     print(f"done — {len(files)} file(s), {failed} stage failure(s)")
     print(f"next: orbitcut inventory")
     return 1 if failed else 0
+
+
+def cmd_timing(args) -> int:
+    """Where ingest actually spends its time.
+
+    Worth having as a command rather than a guess: "would the GPU help" is
+    unanswerable in the abstract and trivial to answer from the record, because
+    every stage already stores when it started and finished. A stage that is 5%
+    of wall time cannot be made 5% faster no matter what you accelerate.
+    """
+    from datetime import datetime
+
+    conn = db.connect()
+    rows = conn.execute(
+        "SELECT stage, started_at, finished_at FROM stage_run WHERE status = 'ok'"
+    ).fetchall()
+    if not rows:
+        print("no completed stages recorded yet")
+        return 1
+
+    def seconds(a: str | None, b: str | None) -> float | None:
+        if not a or not b:
+            return None
+        try:
+            return (datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds()
+        except ValueError:
+            return None
+
+    per: dict[str, list[float]] = {}
+    for r in rows:
+        s = seconds(r["started_at"], r["finished_at"])
+        if s is not None and s >= 0:
+            per.setdefault(r["stage"], []).append(s)
+    if not per:
+        print("stages recorded but without usable timestamps")
+        return 1
+
+    total = sum(sum(v) for v in per.values())
+    order = sorted(per.items(), key=lambda kv: -sum(kv[1]))
+
+    # Stage timestamps are stored to the second, so anything faster than that
+    # reads as zero. Fine when proxies take minutes; worth saying rather than
+    # dividing by it.
+    if total <= 0:
+        print("every stage completed inside the 1 s timestamp resolution — "
+              "nothing here is slow enough to be worth optimising")
+        return 0
+
+    hdr = f"{'stage':<12}{'runs':>6}{'total':>10}{'per file':>10}{'share':>8}"
+    print(hdr); print("-" * len(hdr))
+    for stage, vals in order:
+        tot = sum(vals)
+        print(f"{stage:<12}{len(vals):>6}{tot / 60:>9.1f}m"
+              f"{tot / len(vals):>9.1f}s{tot / total:>8.0%}")
+    print("-" * len(hdr))
+    print(f"{'all':<12}{sum(len(v) for v in per.values()):>6}{total / 60:>9.1f}m")
+
+    # The interpretation is the point of the command, so make it rather than
+    # leaving a table to be read.
+    top, vals = order[0]
+    share = sum(vals) / total
+    print()
+    if top == "proxy":
+        print(f"  Proxy is {share:.0%} of ingest — it is the decode/encode stage, so")
+        print("  it is the only one an encoder or a GPU can touch. Check whether it")
+        print("  is already on hardware: `orbitcut doctor` reports the backend.")
+        print("  If it is, the remaining lever is running files concurrently, not")
+        print("  a faster encoder — see `orbitcut ingest --jobs`.")
+    else:
+        print(f"  {top} is {share:.0%} of ingest, and it does not decode video.")
+        print("  Faster video encoding cannot move it. Concurrency can:")
+        print("      orbitcut ingest <dir> --jobs 4")
+    return 0
+
+
+def _proxy_minutes(conn) -> float:
+    """Minutes already spent making proxies, for scaling a projection against."""
+    from datetime import datetime
+
+    total = 0.0
+    for r in conn.execute("SELECT started_at, finished_at FROM stage_run "
+                          "WHERE stage = 'proxy' AND status = 'ok'").fetchall():
+        try:
+            total += (datetime.fromisoformat(r["finished_at"])
+                      - datetime.fromisoformat(r["started_at"])).total_seconds()
+        except (TypeError, ValueError):
+            continue
+    return total / 60.0
+
+
+def cmd_bench(args) -> int:
+    """Which of read / decode / encode is the ceiling, measured not guessed."""
+    from . import bench as bench_mod
+
+    conn = db.connect()
+    path = args.asset
+    if not Path(path).exists():
+        row = _find(conn, args.asset)
+        if row is None:
+            return 1
+        path = row["source_path"]
+        if not path or not Path(path).exists():
+            print(f"the original for {row['filename']} is not at {path}")
+            print("bench needs an original, not a proxy — point it at a file directly.")
+            return 1
+
+    print(f"benchmarking {Path(path).name}")
+    res = bench_mod.run(path, height=args.height)
+    print(f"  {res['size_gb']:.1f} GB, {res['width']}x{res['height']}, "
+          f"{res['duration_s'] / 60:.1f} min — measuring a "
+          f"{res['window_s']:.0f} s window from {int(bench_mod.START_FRACTION * 100)}% in\n")
+
+    read = res["read_mbps"]
+    if read:
+        # The number that matters is not MB/s, it is what MB/s implies for a
+        # whole file: a stage cannot go faster than the bytes arrive.
+        secs = res["size_gb"] * 1000 / read
+        ceiling = res["duration_s"] / secs if secs else 0
+        span = f"{secs:.0f} s" if secs < 90 else f"{secs / 60:.1f} min"
+        print(f"  disk read        {read:>8.0f} MB/s   "
+              f"→ {span} per file, a hard ceiling of {ceiling:.0f}x realtime")
+        if read > 2000:
+            # Nothing spinning or USB-attached reaches this. A repeat run on the
+            # same file is the usual cause, and it measures RAM, not the disk.
+            print("                            (cached — run on a file you have not "
+                  "just read for a true figure)")
+    dx = res["decode_x"]
+    if dx:
+        how = "" if res.get("decode_hw") == config.HWACCEL else f" ({res['decode_hw']})"
+        print(f"  read+decode+scale{dx:>8.1f}x{how:<9} everything except the encoder")
+        if res.get("decode_note"):
+            print(f"                            {res['decode_note'][:70]}")
+    elif res.get("decode_error"):
+        print(f"  read+decode+scale  failed   {res['decode_error']}")
+
+    print(f"\n  {'backend':<20}{'speed':>9}   note")
+    print("  " + "-" * 52)
+    best, best_x = None, 0.0
+    current_x = None
+    for hw, r in res["backends"].items():
+        x = r["x_realtime"]
+        tag = "current" if hw == config.HWACCEL else ""
+        if x is None:
+            print(f"  {hw:<20}{'--':>9}   unavailable: {r['error'][:40]}")
+            continue
+        if hw == config.HWACCEL:
+            current_x = x
+        if x > best_x:
+            best, best_x = hw, x
+        print(f"  {hw:<20}{x:>8.1f}x   {tag}")
+
+    io_ceiling = None
+    if read:
+        secs = res["size_gb"] * 1000 / read
+        io_ceiling = (res["duration_s"] / secs) if secs else None
+
+    # One verdict, not several. Reading, decoding and encoding are in series, so
+    # exactly one of them is binding — printing a paragraph about each produces
+    # advice that contradicts itself.
+    # A stage cannot be slower than a pipeline that contains it. When that shows
+    # up, the probe is measuring itself and must not be allowed to reach a
+    # verdict — the first version of this command concluded "decoding is the
+    # ceiling" from exactly this impossibility.
+    if dx and current_x and dx < current_x * 0.98:
+        print(f"\n  The read+decode+scale figure ({dx:.1f}x) came out below the full "
+              f"pipeline ({current_x:.1f}x),")
+        print("  which cannot be true — it is a subset of that work. Treat it as a bad")
+        print("  measurement, not a finding, and read only the table below.")
+        dx = None
+
+    print()
+    if best and current_x and best != config.HWACCEL and best_x > current_x * 1.15:
+        print(f"  {best} is {best_x / current_x:.1f}x faster than the backend you are using.")
+        print(f"      export ORBITCUT_HWACCEL={best}")
+        print("  Then re-ingest with --force to rebuild the proxies, or leave the")
+        print("  existing ones alone and let it apply to everything from here.")
+    elif io_ceiling and best_x and io_ceiling < best_x * 1.2:
+        print(f"  Reading the file caps you at {io_ceiling:.1f}x and the pipeline runs at")
+        print(f"  {best_x:.1f}x, so the disk is the constraint. No encoder setting can")
+        print("  help; faster storage can.")
+    elif dx and best_x and dx < best_x * 1.25:
+        print(f"  Everything up to the encoder is {dx:.1f}x and the whole pipeline is "
+              f"{best_x:.1f}x,")
+        print("  so the encoder is nearly free and the cost is reading, decoding and")
+        print("  scaling. No encoder setting will move that. Concurrency is the lever")
+        print("  left, and the table below says whether it works.")
+    elif dx and best_x and dx > best_x * 1.5:
+        print(f"  Everything up to the encoder runs at {dx:.1f}x and the full pass at "
+              f"{best_x:.1f}x,")
+        print("  so the encoder is the cost — reading, decoding and scaling are not.")
+    else:
+        print("  The backend you are on is already the fastest available here.")
+
+    conc = res.get("concurrency") or {}
+    ok = {n: v for n, v in conc.items() if v}
+    if len(ok) > 1:
+        one = ok.get(1)
+        print(f"\n  {'concurrent':<20}{'total':>9}   {res.get('concurrency_backend', '')}")
+        print("  " + "-" * 52)
+        for n, v in sorted(ok.items()):
+            gain = f"{v / one:.1f}x" if one else ""
+            print(f"  {n} at once{'':<11}{v:>8.1f}x   {gain}")
+        top = max(ok, key=lambda n: ok[n])
+        if one and ok[top] > one * 1.3:
+            print(f"\n  Running {top} at once is {ok[top] / one:.1f}x the total throughput —")
+            print("  the engine is not saturated by one stream. Use it:")
+            print(f"      orbitcut ingest <dir> --jobs {top}")
+            spent = _proxy_minutes(conn)
+            if spent:
+                print(f"  Your recorded proxy time is {spent:.0f} min; at this ratio "
+                      f"that is about {spent * one / ok[top]:.0f}.")
+        elif one:
+            print("\n  Concurrency buys nothing here — one stream already saturates the")
+            print("  pipeline, so --jobs would only interleave the same total work.")
+    return 0
 
 
 # ------------------------------------------------------------------ inventory
@@ -296,11 +579,6 @@ def _light_src(r) -> str:
 def _print_rides(rows, has_gps) -> None:
     """One line per ride. Chapters are one continuous recording, not separate
     clips, so counting them as files overstates how much footage you have."""
-    weights = _weights(args.weights)
-    if weights:
-        _show_weights(weights)
-        print()
-
     rides: dict[str, list] = {}
     for r in rows:
         rides.setdefault(r["ride_id"] or r["content_hash"], []).append(r)
@@ -383,6 +661,15 @@ def cmd_score(args) -> int:
         print("nothing to score — run `orbitcut ingest` first")
         return 1
 
+    stale = set(db.stale_stage(conn, "telemetry"))
+    if stale:
+        names = [r["filename"] or r["content_hash"][:12] for r in db.assets(conn)
+                 if r["content_hash"] in stale]
+        print(f"  {len(names)} asset(s) still carry telemetry from an older extraction:")
+        print(f"    {', '.join(names[:6])}{' …' if len(names) > 6 else ''}")
+        print("  Scoring them mixes two extractions in one corpus. Re-ingest the")
+        print("  directory holding those originals, or pass each file to `ingest`.\n")
+
     print(f"{len(rows)} asset(s)\n")
     hdr = f"{'file':<22}{'air':>5}{'total':>8}{'longest':>9}{'rough p95':>11}{'spd p95':>9}"
     print(hdr); print("-" * len(hdr))
@@ -414,15 +701,44 @@ def cmd_calibrate(args) -> int:
     if not paths:
         print("nothing scored yet — run `orbitcut score`")
         return 1
-    table = cal_mod.fit(paths)
+    weights = _weights(args.weights) or dict(cal_mod.WEIGHTS)
+    table = cal_mod.fit(paths, weights, getattr(args, "sharpness", None))
     p = cal_mod.save(table)
     print(f"calibrated on {table['n_assets']} assets, "
-          f"{table['n_seconds'] / 3600:.1f} h of footage\n")
+          f"{table['n_seconds'] / 3600:.1f} h of footage")
+    _show_weights(weights)
+    print()
     hdr = f"{'feature':<12}{'p50':>10}{'p90':>10}{'p99':>10}{'samples':>10}"
     print(hdr); print("-" * len(hdr))
     for name, f in table["features"].items():
         b = f["breaks"]
         print(f"{name:<12}{b[50]:>10.2f}{b[90]:>10.2f}{b[99]:>10.2f}{f['n']:>10}")
+
+    missing = table.get("missing") or {}
+    if missing:
+        print("\nnot usable:")
+        for name, why in missing.items():
+            print(f"  {name:<12}{why}")
+        if any(m.startswith("gps") or m in ("speed_ms", "grade", "lat_accel")
+               for m in missing):
+            print("\n  Missing GPS features usually mean extraction, not the ride.\n"
+                  "  `orbitcut inventory` reads the stream list, so it can say GPS\n"
+                  "  is present while the columns never reached the scorer. Check\n"
+                  "  with:  orbitcut verify <one file that should have GPS>")
+
+    # Availability buckets. Rides carrying different features are ranked
+    # separately, so it is worth seeing how the library splits — a bucket that
+    # is one short ride is not a distribution, and falls back to global.
+    buckets = {k: v for k, v in table.get("levels", {}).items() if k != "global"}
+    if buckets:
+        print(f"\n{'bucket':<30}{'hours':>8}{'share':>8}")
+        print("-" * 46)
+        total = sum(v["n"] for v in buckets.values())
+        for _k, v in sorted(buckets.items(), key=lambda kv: -kv[1]["n"]):
+            print(f"{v['features']:<30}{v['n'] / 3600:>8.1f}{v['n'] / total:>8.0%}")
+        if len(buckets) > 1:
+            print("\n  Rides are compared within their own bucket, so the ones\n"
+                  "  without GPS no longer float to the top for lack of features.")
     print(f"\nwrote {p}")
     return 0
 
@@ -443,7 +759,8 @@ def cmd_overlay(args) -> int:
         return 1
 
     weights = _weights(args.weights)
-    scored = cal_mod.apply(pd.read_parquet(row["scores_path"]), table, weights)
+    scored = cal_mod.apply(pd.read_parquet(row["scores_path"]), table, weights,
+                           getattr(args, "sharpness", None))
     if weights:
         _show_weights(weights)
     ev_path = config.derived_dir(row["content_hash"]) / "air_events.parquet"
@@ -495,7 +812,14 @@ def cmd_rank(args) -> int:
     weights = _weights(args.weights)
     if weights:
         _show_weights(weights)
+        if not cal_mod.weights_match(table, weights):
+            print("  note      not the weights this calibration was fitted with, so")
+            print("            cross-ride comparison is approximate. If you settle on")
+            print("            them: orbitcut calibrate --weights ...")
         print()
+    if "levels" not in table:
+        print("  This calibration predates availability buckets, so rides without\n"
+              "  GPS will rank too highly. Re-run `orbitcut calibrate`.\n")
 
     rides: dict[str, list] = {}
     for r in db.assets(conn):
@@ -510,17 +834,30 @@ def cmd_rank(args) -> int:
         group.sort(key=lambda r: r["chapter"] or 0)
         # Chapters are one continuous recording: concatenate before ranking,
         # or a two-minute tail chapter competes as if it were a whole ride.
-        frames = [cal_mod.apply(pd.read_parquet(r["scores_path"]), table, weights)
+        frames = [cal_mod.apply(pd.read_parquet(r["scores_path"]), table, weights,
+                                getattr(args, "sharpness", None))
                   for r in group]
         comp = np.concatenate([f["composite"].to_numpy() for f in frames])
         comp = comp[np.isfinite(comp)]
         if not len(comp):
             continue
-        best = np.sort(comp)[::-1][:30]      # about two or three clips' worth
+        # A clip is contiguous. `top30` took the 30 best seconds from anywhere
+        # in the ride, which measures how much good footage a ride contains in
+        # total — a different question from whether it contains one great clip,
+        # and one that favours long even rides. Best contiguous window answers
+        # the question clip selection will actually ask.
+        best = np.sort(comp)[::-1][:30]
+        roll = pd.Series(comp).rolling(CLIP_S).mean().to_numpy()
+        clip = float(np.nanmax(roll)) if np.isfinite(roll).any() else float("nan")
+        # Which sub-scores this ride actually had — the bucket it was ranked in.
+        have = [k for k in cal_mod.FEATURES
+                if any(np.isfinite(f[cal_mod.SUB[k]]).any() for f in frames)]
         rows.append({
             "ride": ride,
             "chapters": len(group),
             "dur": sum(r["duration_s"] or 0 for r in group) / 60,
+            "feat": "".join(k[0] for k in cal_mod.FEATURES if k in have),
+            "clip": clip,
             "top30": float(best.mean()),
             "peak": float(comp.max()),
             "air": sum(r["air_events"] or 0 for r in group),
@@ -528,20 +865,29 @@ def cmd_rank(args) -> int:
             "light": group[0]["lighting"] or "-",
         })
 
-    rows.sort(key=lambda r: r["top30"], reverse=True)
+    key = "top30" if getattr(args, "by", "clip") == "top30" else "clip"
+    rows.sort(key=lambda r: (r[key] if np.isfinite(r[key]) else -1), reverse=True)
     if args.top:
         rows = rows[:args.top]
 
-    hdr = (f"{'ride':<8}{'ch':>3}{'dur':>8}{'top30':>8}{'peak':>7}"
+    hdr = (f"{'ride':<8}{'ch':>3}{'dur':>8}{'feat':>6}{'clip':>7}{'top30':>8}{'peak':>7}"
            f"{'air':>5}{'longest':>9}{'light':>10}")
     print(hdr); print("-" * len(hdr))
     for r in rows:
-        print(f"{r['ride']:<8}{r['chapters']:>3}{r['dur']:>7.1f}m"
-              f"{r['top30']:>8.2f}{r['peak']:>7.2f}"
+        print(f"{r['ride']:<8}{r['chapters']:>3}{r['dur']:>7.1f}m{r['feat']:>6}"
+              f"{r['clip']:>7.2f}{r['top30']:>8.2f}{r['peak']:>7.2f}"
               f"{r['air']:>5}{r['longest']:>8.2f}s{r['light']:>10}")
     print()
-    print("  top30 = mean of the ride's 30 best seconds, which is roughly what")
-    print("  clip selection would take from it. Sorted by that.")
+    print(f"  clip  = best contiguous {CLIP_S} s — does this ride contain one great")
+    print("          clip? Sorted by this.")
+    print("  top30 = the 30 best seconds from anywhere in the ride — how much good")
+    print("          footage it holds in total. A long even ride wins on this and")
+    print("          loses on clip; a ride with one real sprint does the reverse.")
+    print("          Compare the two columns where they disagree.")
+    print()
+    print("  feat  = which sub-scores the ride had (s]peed t]urn r]ough d]escent).")
+    print("  Rides are ranked against others carrying the same ones, so a ride")
+    print("  without GPS is not flattered by having fewer numbers to average.")
     print()
     print("  Check the order against your memory of these rides. If a ride you")
     print("  remember as dull outranks one you remember as good, the calibration")
@@ -568,23 +914,40 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ingest", help="ingest a file or directory")
     p.add_argument("path")
     p.add_argument("--force", action="store_true", help="redo stages even if cached")
+    p.add_argument("--jobs", type=int, default=1,
+                   help="files to process at once (default 1; try 3-4)")
     p.set_defaults(fn=cmd_ingest)
+
+    sub.add_parser("timing", help="where ingest spends its time").set_defaults(fn=cmd_timing)
+
+    p = sub.add_parser("bench", help="what limits proxy speed: disk, decode or encode")
+    p.add_argument("asset", help="a file path, or a hash prefix / filename / ride number")
+    p.add_argument("--height", type=int, help=f"proxy height (default {config.PROXY_HEIGHT})")
+    p.set_defaults(fn=cmd_bench)
 
     p = sub.add_parser("score", help="compute telemetry features")
     p.add_argument("asset", nargs="?", help="hash prefix, filename or ride number")
     p.set_defaults(fn=cmd_score)
 
     p = sub.add_parser("calibrate", help="fit the corpus distribution")
+    p.add_argument("--weights", help="bake these in, e.g. speed=0.5,turn=0.2")
+    p.add_argument("--sharpness", type=float,
+                   help=f"peak emphasis; 1 = average all features, higher favours "
+                        f"a standout moment (default {cal_mod.SHARPNESS:g})")
     p.set_defaults(fn=cmd_calibrate)
 
     p = sub.add_parser("overlay", help="render a proxy with its score curve")
     p.add_argument("asset", help="hash prefix, filename or ride number")
     p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
+    p.add_argument("--sharpness", type=float, help="peak emphasis; see calibrate")
     p.set_defaults(fn=cmd_overlay)
 
     p = sub.add_parser("rank", help="rank rides against each other")
     p.add_argument("--top", type=int, help="only the best N")
+    p.add_argument("--by", choices=("clip", "top30"), default="clip",
+                   help="sort by best contiguous clip (default) or total good footage")
     p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
+    p.add_argument("--sharpness", type=float, help="peak emphasis; see calibrate")
     p.set_defaults(fn=cmd_rank)
 
     p = sub.add_parser("inventory", help="what you have")

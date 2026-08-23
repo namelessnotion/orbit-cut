@@ -275,11 +275,11 @@ by percentile rank against a **corpus-wide calibration table**, not against the 
 
 | Sub-score | Source | Method | w₀ |
 |---|---|---|---|
-| Speed | GPS | 2D ground speed, gated on fix quality | 0.20 |
+| Speed | GPS | 2D ground speed, gated on GPS9 fix and DOP | **0.50** |
 | Turns | GYRO/CORI | Yaw rate in world frame after gravity alignment. Turn events = threshold-crossing zero-crossings. Weight *lateral acceleration* (v × yaw rate) | 0.25 |
 | Roughness | ACCL | RMS of the 5–40 Hz band after removing gravity. Chest and helmet are both body-damped so the correction between them is small — but still calibrate: a helmet reads slightly higher on impacts and slightly lower on sustained chatter | 0.18 |
 | Airtime | ACCL | Freefall detector: \|accel\| within ~0.15 g of zero for >100 ms, then a landing spike. Duration of the null window *is* the airtime, measured | 0.27 |
-| Descent | GPS+GRAV | Altitude derivative and pitch. Climbing down-weighted, not zeroed | 0.10 |
+| Descent | GPS+GRAV | **Disabled — 0.00.** GoPro altitude cannot support it; see the finding below. Revisit when map-matching can supply trail elevation | 0.00 |
 | **Pull** (bikejoring only) | detector box | Orbit's apparent size gives lead distance. A taut, stretched-out line reads as effort the accelerometer never sees | 0.22* |
 | Flow (cross-check) | proxy frames | Optical-flow magnitude on downscaled frames. Fallback when GPS is dead; also catches "fast through tight trees" | cross |
 
@@ -293,6 +293,96 @@ bikejoring profiles, where the vector renormalizes. Solo profiles never see it.
 bikejoring/chest, bikejoring/helmet. Bikejoring weights speed and steadiness up and roughness
 down; a helmet descent weights turns and airtime up. Four is small enough that each profile
 will accumulate enough labeled decisions to actually fit.
+
+### Measured — a stream list is not a feature
+
+`inventory` reported GPS present on 26 of 36 files and it was right: the camera wrote GPS5 and
+the parser returned it. Every one of those rides still scored on roughness and turn rate alone,
+because the extractor named the GPS columns positionally. GoPro's GPS5 is five fields; the
+parser in use appends the sticky GPSF and GPSP values, so what arrives is seven. The
+named-column table listed five, the arity check failed, and the documented positional fallback —
+correct for ACCL and GYRO, whose axis order genuinely varies — renamed `gps_speed2d` to
+`gps5_3`. Nothing raised. Speed, descent and cornering force were `NaN` for the entire library
+for as long as it existed.
+
+Three separate defences existed and none of them fired, which is the part worth keeping:
+
+- `inventory` checked the *stream list*, one layer above the columns.
+- `calibrate` skipped features with too few samples, so a feature that was empty everywhere
+  vanished from its own report instead of appearing as a zero.
+- `score` renormalized the composite over the features present, so the arithmetic stayed
+  well-formed all the way to a plausible-looking ranking.
+
+Each is reasonable alone. Together they turn a naming mismatch into a silent capability loss.
+The corrections are cheap and all of the same kind — **make absence loud**: the extractor warns
+when a named stream's arity is unrecognised instead of falling back quietly, `calibrate` lists
+what it could not use and why, and `verify` says outright when a GPS stream is present but its
+columns are not. The general form: a fallback that is right for one stream must not be the
+default for every stream, and a pipeline that degrades gracefully has to say that it degraded.
+
+### Measured — calibration must also bucket on *feature availability*
+
+Renormalizing the weighted mean over "whatever sub-scores are present" is the obvious way to
+handle a ride shot without GPS, and it is quietly wrong. A mean of two terms is more variable
+than a mean of four, so it reaches high values more often even when every underlying feature is
+distributed identically. This is not a small effect and it is not theoretical: the first real
+run of `orbitcut rank` over 28 rides put **all six** GPS-less rides in the top six places, and a
+simulation with no real difference between the rides at all reproduced exactly that — six for
+six, from features with identical distributions.
+
+The fix is a second ranking. After the level is computed it is percentile-ranked against other
+seconds *carrying the same set of features*, which turns the question from "how high is this
+average" into "how good is this for what we can measure here" — a question that is comparable
+across rides. In the same simulation the gap between the two groups falls from +0.058 to +0.003
+and the top six goes to 3/6, which is what chance looks like. Within a ride the change is
+invisible (Spearman ≈0.998 against the old curve), because it only ever mattered *between*
+rides.
+
+The general rule this is an instance of: **any calibration key that varies in how much
+information it carries needs its own distribution, not a renormalized share of a common one.**
+Availability is the first such axis; `lighting` (below) is the second; `(style, mount)` is the
+third. They compose into one key, and a bucket too thin to have a distribution falls back to the
+global one rather than pretending.
+
+### Measured — the composite must not average across features
+
+The weighted arithmetic mean was wrong, and wrong in a way that produced a
+plausible-looking ranking rather than an obvious failure. Averaging punishes
+specialisation, and **every exciting second is specialised**: fast means
+straight, so a sprint scores near zero on turns; twisty means slow; a rock
+garden is neither fast nor flowing. Scored under the mean:
+
+| second | speed | turn | rough | composite |
+|---|---|---|---|---|
+| sprint | 0.99 | 0.20 | 0.55 | 0.546 |
+| tight switchbacks | 0.30 | 0.97 | 0.50 | 0.626 |
+| rock garden | 0.25 | 0.45 | 0.98 | 0.542 |
+| **briskly consistent, never special** | 0.85 | 0.85 | 0.85 | **0.650** |
+
+All three memorable seconds lose to the forgettable one. On the real library
+this showed up exactly as "the top rides are the most consistently paced ones
+but may not contain a real sprint" — which is how it was caught, by watching
+footage against the ranking rather than by any test.
+
+The composite is now a **power mean**, `(Σ w·s^p / Σ w)^(1/p)`: p = 1 is the old
+arithmetic mean, p → ∞ is the maximum, and `SHARPNESS` sets it. This is the same
+principle `AIR_GAIN` already encodes for airtime — a rare event and a sustained
+level are different kinds of evidence and must not be averaged — applied one
+level up, across features instead of across time.
+
+Two further consequences worth keeping:
+
+- **Sharpness cannot repair a weighting that disagrees with the taste.** A
+  sprint peaks on speed alone, so while speed carried the smallest weight and
+  turn the largest, no value of p promoted sprint rides. Weight and sharpness
+  are separate knobs and both are taste. Settled at `speed 0.50 / turn 0.30 /
+  rough 0.20`, `SHARPNESS = 8`.
+- **"Best clip" and "most good footage" are different questions.** `rank` used
+  the mean of a ride's 30 best seconds taken from *anywhere* in it, which
+  measures total good footage and favours long even rides. It now also reports
+  the best *contiguous* 12 s — the question stage 3 will actually ask — and
+  sorts on that. Both columns are shown, because where they disagree is
+  informative.
 
 ## Stage 3 — Cut
 

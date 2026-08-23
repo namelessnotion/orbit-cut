@@ -42,8 +42,30 @@ def _fps_mode_flag() -> str:
     return "-vsync"
 
 
+# Each backend degrades to the next one on failure rather than straight to
+# software. That distinction matters: `videotoolbox_vt` only adds a hardware
+# scaler to a path that already works, so if the scaler is missing the right
+# answer is to lose the scaler, not to lose the GPU as well.
+FALLBACK = {
+    "videotoolbox_vt": "videotoolbox",
+    "videotoolbox": "none",
+    "cuda": "none",
+    "none": None,
+}
+
+
 def _decode_args(hwaccel: str) -> list[str]:
+    if hwaccel == "videotoolbox_vt":
+        # Keep decoded frames in GPU memory so the scaler can run there too.
+        # The format is `videotoolbox_vld`, not `videotoolbox` — the latter is
+        # the hwaccel's name, not the pixel format's, and ffmpeg rejects it with
+        # "Unrecognised hwaccel output format", which reads like the build lacks
+        # support when in fact the argument was simply wrong.
+        return ["-hwaccel", "videotoolbox",
+                "-hwaccel_output_format", "videotoolbox_vld"]
     if hwaccel == "videotoolbox":
+        # No output format: frames come back to system memory, where a software
+        # `scale` runs. Costs CPU, but works on every build.
         return ["-hwaccel", "videotoolbox"]
     if hwaccel == "cuda":
         # Keep frames on the GPU: decode, scale and encode without a PCIe round trip.
@@ -56,6 +78,13 @@ def _filter_and_encode(hwaccel: str, height: int) -> list[str]:
         return [
             "-vf", f"scale_cuda=-2:{height}",
             "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", config.PROXY_BITRATE,
+        ]
+    if hwaccel == "videotoolbox_vt":
+        # scale_vt arrived in ffmpeg 6.1. On an older build this filter does not
+        # exist and the run fails immediately — cheaply, before any decoding.
+        return [
+            "-vf", f"scale_vt=-2:{height}",
+            "-c:v", "h264_videotoolbox", "-b:v", config.PROXY_BITRATE,
         ]
     if hwaccel == "videotoolbox":
         return [
@@ -107,11 +136,13 @@ def make_proxy(
     if any(marker in low for marker in _ARG_ERRORS):
         raise RuntimeError(f"ffmpeg rejected the command: {stderr[:400]}")
 
-    if hwaccel != "none":
+    nxt = FALLBACK.get(hwaccel)
+    if nxt is not None:
         # Hardware paths fail for unglamorous reasons — an unsupported pixel
-        # format, a busy GPU. Say what actually happened before retrying.
+        # format, a missing filter, a busy GPU. Say what actually happened, and
+        # step down one rung rather than abandoning the GPU entirely.
         first_line = stderr.splitlines()[0] if stderr else "no stderr"
-        print(f"  ! {hwaccel} failed ({first_line[:120]}) — retrying in software")
-        return make_proxy(path, content_hash, hwaccel="none", height=height)
+        print(f"  ! {hwaccel} failed ({first_line[:120]}) — retrying with {nxt}")
+        return make_proxy(path, content_hash, hwaccel=nxt, height=height)
 
     raise RuntimeError(f"ffmpeg failed: {stderr[:400]}")

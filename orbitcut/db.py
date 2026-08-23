@@ -84,8 +84,14 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     config.ensure_dirs()
-    conn = sqlite3.connect(config.DB_PATH)
+    conn = sqlite3.connect(config.DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    # WAL lets a reader run while a writer holds the file, which matters as soon
+    # as ingest runs more than one file at a time; busy_timeout turns the
+    # remaining write collisions into a short wait instead of an exception.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
     _migrate(conn)          # must precede the indexes: they reference columns
     conn.executescript(INDEXES)
@@ -192,6 +198,24 @@ def stage_done(conn: sqlite3.Connection, content_hash: str, stage: str) -> bool:
     if row is None:
         return False
     return row["status"] == "ok" and row["stage_version"] >= config.STAGE_VERSIONS[stage]
+
+
+def stale_stage(conn: sqlite3.Connection, stage: str) -> list[str]:
+    """Assets whose newest successful run of `stage` predates the current version.
+
+    Bumping a stage_version makes `ingest` redo that stage — but only for files
+    it actually visits, and it visits a directory, not the database. An original
+    that has been archived off since it was ingested is never revisited, so it
+    keeps its old derived data indefinitely while everything else moves on. That
+    is a corpus quietly built from two different extractions, which is worse than
+    either, so it needs to be visible rather than inferred.
+    """
+    rows = conn.execute(
+        "SELECT content_hash FROM stage_run WHERE stage = ? AND status = 'ok' "
+        "AND stage_version < ?",
+        (stage, config.STAGE_VERSIONS[stage]),
+    ).fetchall()
+    return [r["content_hash"] for r in rows]
 
 
 def record_stage(

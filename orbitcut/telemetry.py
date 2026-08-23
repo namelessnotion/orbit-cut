@@ -21,11 +21,33 @@ import pandas as pd
 
 from . import config
 
-# Streams whose component order is documented and stable.
+# Streams whose component order is documented and stable, keyed by arity.
+#
+# Keying by arity is not over-engineering, it is the fix for a bug that cost a
+# whole library's worth of GPS. GPS5 is five fields in the GPMF spec, but
+# telemetrik appends the sticky GPSF (fix) and GPSP (precision) values to every
+# sample, so what arrives here is seven. The old table listed five names, the
+# arity did not match, and the positional fallback below quietly produced
+# `gps5_0 … gps5_6` instead. Nothing crashed. `gps_speed2d` simply never
+# existed, so speed, grade and cornering force were NaN on every ride in the
+# library while `inventory` cheerfully reported GPS present — it was reading
+# the stream list, which was correct.
 NAMED_COLUMNS = {
-    "GPS5": ["gps_lat", "gps_lon", "gps_alt", "gps_speed2d", "gps_speed3d"],
-    "CORI": ["cori_w", "cori_x", "cori_y", "cori_z"],
-    "IORI": ["iori_w", "iori_x", "iori_y", "iori_z"],
+    "GPS5": {
+        5: ["gps_lat", "gps_lon", "gps_alt", "gps_speed2d", "gps_speed3d"],
+        7: ["gps_lat", "gps_lon", "gps_alt", "gps_speed2d", "gps_speed3d",
+            "gps_fix", "gps_dop"],
+    },
+    # HERO11 and later. Same first five fields, then a timestamp split into
+    # days-since-2000 and seconds-since-midnight, then per-sample DOP and fix.
+    # Per-sample is a real gain over GPS5, whose fix is sticky across a whole
+    # payload and so cannot show a lock coming and going.
+    "GPS9": {
+        9: ["gps_lat", "gps_lon", "gps_alt", "gps_speed2d", "gps_speed3d",
+            "gps_days", "gps_secs", "gps_dop", "gps_fix"],
+    },
+    "CORI": {4: ["cori_w", "cori_x", "cori_y", "cori_z"]},
+    "IORI": {4: ["iori_w", "iori_x", "iori_y", "iori_z"]},
 }
 # Everything else gets positional names. ACCL/GYRO/GRAV axis order varies by
 # camera generation, and the features that matter most — |accel| for roughness
@@ -49,8 +71,17 @@ def _columns_for(key: str, values: list[Any]) -> dict[str, np.ndarray]:
     first = values[0]
     if isinstance(first, (list, tuple)):
         arity = len(first)
-        names = NAMED_COLUMNS.get(key)
-        if not names or len(names) != arity:
+        known = NAMED_COLUMNS.get(key)
+        names = (known or {}).get(arity)
+        if names is None:
+            # Falling back is right for ACCL/GYRO/GRAV and wrong for a stream we
+            # thought we knew: it renames the fields everything downstream looks
+            # up by name, and does it silently. Say so.
+            if known:
+                print(f"  ! {key}: {arity} fields, expected "
+                      f"{' or '.join(str(a) for a in sorted(known))} — "
+                      f"falling back to positional names, so nothing that reads "
+                      f"{known[min(known)][0]} will find it. Check the parser version.")
             names = [f"{key.lower()}_{i}" for i in range(arity)]
         arr = np.array(
             [v if isinstance(v, (list, tuple)) and len(v) == arity else [np.nan] * arity
@@ -102,7 +133,44 @@ def extract(path: str | Path, content_hash: str) -> dict[str, Any]:
             print(f"  ! {key}: {exc}")                # take the whole file down
             continue
 
+    # GPS is parsed here rather than by telemetrik, for both stream types and
+    # for different reasons — see gps.py. This deliberately runs last and
+    # overwrites any gps_* columns already in `frame`: telemetrik's GPS5 values
+    # are scaled by a single divisor, which leaves latitude and longitude right
+    # and everything else wrong by orders of magnitude.
+    try:
+        from . import gps
+        fix = gps.extract(path)
+    except Exception as exc:
+        print(f"  ! GPS: {exc}")
+        fix = None
+    if fix:
+        for name, col in fix["columns"].items():
+            good = np.isfinite(col)
+            if good.sum() >= 2:
+                frame[name] = np.interp(grid, fix["t"][good], col[good])
+        if fix["key"] not in present:
+            present = sorted(present + [fix["key"]])
+        span = float(fix["t"][-1] - fix["t"][0]) if fix["n"] > 1 else 0.0
+        rates[fix["key"]] = round(fix["n"] / span, 1) if span > 0 else 0.0
+
     df = pd.DataFrame(frame)
+
+    # Speed is the field most likely to be wrong without looking wrong, because
+    # a scaling error leaves position perfectly plausible. Check it against what
+    # a bicycle does rather than against zero.
+    if "gps_speed2d" in df:
+        sp = df["gps_speed2d"].to_numpy(dtype=float)
+        sp = sp[np.isfinite(sp)]
+        if len(sp):
+            p95 = float(np.percentile(sp, 95))
+            if p95 < 0.5:
+                print(f"  ! GPS speed p95 is {p95:.5g} m/s — too slow to be riding. "
+                      f"Suspect a SCAL divisor, not a slow ride.")
+            elif p95 > 30:
+                print(f"  ! GPS speed p95 is {p95:.5g} m/s ({p95 * 3.6:.0f} km/h) — "
+                      f"too fast for a bike. Suspect a SCAL divisor.")
+
     telemetry_path = out_dir / "telemetry_10hz.parquet"
     df.to_parquet(telemetry_path, index=False)
 
@@ -194,6 +262,9 @@ def _diagnostics(df: pd.DataFrame) -> dict[str, Any]:
         "gps_fix_fraction": None,
         "gps_lat": None,
         "gps_lon": None,
+        "gps_speed_p50": None,
+        "gps_speed_p95": None,
+        "gps_locked_fraction": None,
         "horizon_locked": None,
     }
 
@@ -212,6 +283,21 @@ def _diagnostics(df: pd.DataFrame) -> dict[str, Any]:
         if valid.any():
             out["gps_lat"] = float(np.median(lat[valid]))
             out["gps_lon"] = float(np.median(lon[valid]))
+
+    # Speed is reported here for one reason: it is the number that makes a
+    # broken GPS extraction obvious. A stream list saying GPS5 tells you the
+    # camera wrote location data, not that this pipeline read it.
+    if "gps_speed2d" in df.columns:
+        sp = df["gps_speed2d"].to_numpy(dtype=float)
+        sp = sp[np.isfinite(sp)]
+        if len(sp):
+            out["gps_speed_p50"] = float(np.median(sp))
+            out["gps_speed_p95"] = float(np.percentile(sp, 95))
+
+    if "gps_fix" in df.columns:
+        fx = df["gps_fix"].to_numpy(dtype=float)
+        if np.isfinite(fx).any():
+            out["gps_locked_fraction"] = float(np.mean(fx[np.isfinite(fx)] >= 1.5))
 
     # Horizon Lock is detected here, never read from a capture setting.
     #
