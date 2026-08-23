@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS asset (
 
     proxy_path     TEXT,
     contact_path   TEXT,
+    scores_path    TEXT,
+    air_events     INTEGER,
+    air_total_s    REAL,
+    air_longest_s  REAL,
     telemetry_path TEXT,
     imu_path       TEXT,
     archived_path  TEXT,

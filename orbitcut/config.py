@@ -1,4 +1,5 @@
 """Configuration. Everything env-overridable so the same code runs on any machine."""
+
 from __future__ import annotations
 
 import os
@@ -7,9 +8,9 @@ from pathlib import Path
 
 # --- where things live -------------------------------------------------------
 ROOT = Path(os.environ.get("ORBITCUT_ROOT", Path.home() / "orbitcut")).expanduser()
-INBOX = ROOT / "inbox"          # transient: fresh offload, cleared by archive
-DERIVED = ROOT / "derived"      # keyed by content hash — proxy, telemetry, thumbs
-RENDERS = ROOT / "renders"      # finished clips
+INBOX = ROOT / "inbox"  # transient: fresh offload, cleared by archive
+DERIVED = ROOT / "derived"  # keyed by content hash — proxy, telemetry, thumbs
+RENDERS = ROOT / "renders"  # finished clips
 DB_PATH = Path(os.environ.get("ORBITCUT_DB", ROOT / "orbitcut.db")).expanduser()
 
 # Archive destination. Empty until you mount the desktop share.
@@ -28,15 +29,27 @@ PROXY_BITRATE = os.environ.get("ORBITCUT_PROXY_BITRATE", "2M")
 # redo only that stage rather than everything.
 STAGE_VERSIONS = {
     "probe": 1,
-    "telemetry": 1,
+    "telemetry": 2,
     "proxy": 1,
     "thumbs": 1,
+    "score": 1,
     "archive": 1,
 }
 
 # --- telemetry ---------------------------------------------------------------
-RESAMPLE_HZ = 10.0   # the common grid every scorer reads
-STREAMS = ["ACCL", "GYRO", "GPS5", "GRAV", "CORI", "IORI", "SHUT", "ISOE", "WBAL", "TMPC"]
+RESAMPLE_HZ = 10.0  # the common grid every scorer reads
+STREAMS = [
+    "ACCL",
+    "GYRO",
+    "GPS5",
+    "GRAV",
+    "CORI",
+    "IORI",
+    "SHUT",
+    "ISOE",
+    "WBAL",
+    "TMPC",
+]
 
 VIDEO_SUFFIXES = {".mp4", ".MP4", ".mov", ".MOV", ".lrv", ".LRV"}
 

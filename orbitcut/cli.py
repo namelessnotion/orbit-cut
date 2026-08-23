@@ -4,15 +4,43 @@
     orbitcut verify FILE            one file, in detail — run this first
     orbitcut ingest PATH            hash, probe, telemetry, proxy
     orbitcut inventory [--csv OUT]  what you actually have
+
+    orbitcut score [ASSET]          telemetry features, per second
+    orbitcut calibrate              fit the 0-1 scale to your library
+    orbitcut overlay ASSET          watch a ride with its score curve
+    orbitcut rank                   rank rides against each other
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
-from . import config, db, hashing, ingest, probe as probe_mod, telemetry as tel_mod
+from . import (calibrate as cal_mod, config, db, hashing, ingest, overlay as ov_mod,
+               probe as probe_mod, score as score_mod, telemetry as tel_mod)
+
+
+def _dependencies() -> list[tuple[str, bool, str]]:
+    """(name, installed, note) for every declared dependency."""
+    from importlib.metadata import PackageNotFoundError, requires, version
+
+    out = []
+    try:
+        reqs = requires("orbitcut") or []
+    except PackageNotFoundError:
+        return [("orbitcut", False, " — not installed; run pip install -e .")]
+
+    for raw in reqs:
+        spec, _, marker = raw.partition(";")
+        name = re.split(r"[<>=!\[ ]", spec.strip(), 1)[0]
+        optional = "extra" in marker
+        try:
+            out.append((name, True, f" {version(name)}"))
+        except PackageNotFoundError:
+            out.append((name, False, " (optional)" if optional else ""))
+    return out
 
 
 # --------------------------------------------------------------------- doctor
@@ -37,20 +65,18 @@ def cmd_doctor(_args) -> int:
             print(f"  MISS  {exc}")
             ok = False
 
-    for mod, hint in (
-        ("telemetrik", "pip install telemetrik"),
-        ("pandas", "pip install pandas"),
-        ("pyarrow", "pip install pyarrow"),
-        ("numpy", "pip install numpy"),
-        ("astral", "pip install astral   (optional — day/night from GPS + clock)"),
-    ):
-        try:
-            __import__(mod)
-            print(f"  ok    {mod}")
-        except ImportError:
-            optional = mod == "astral"
-            print(f"  {'warn' if optional else 'MISS'}  {mod} — {hint}")
-            ok = ok and optional
+    # Read the dependency list from package metadata rather than repeating it
+    # here. A hand-maintained list drifts the moment a module gains an import —
+    # which is exactly how scipy and matplotlib shipped undeclared, and why
+    # doctor said "ok" right up until `score` crashed on the missing module.
+    for name, ok_, note in _dependencies():
+        if ok_:
+            print(f"  ok    {name}{note}")
+        elif note == " (optional)":
+            print(f"  warn  {name} missing — optional: pip install {name}")
+        else:
+            print(f"  MISS  {name} — pip install -e .")
+            ok = False
 
     print(f"\n  root      {config.ROOT}")
     print(f"  database  {config.DB_PATH}")
@@ -270,6 +296,11 @@ def _light_src(r) -> str:
 def _print_rides(rows, has_gps) -> None:
     """One line per ride. Chapters are one continuous recording, not separate
     clips, so counting them as files overstates how much footage you have."""
+    weights = _weights(args.weights)
+    if weights:
+        _show_weights(weights)
+        print()
+
     rides: dict[str, list] = {}
     for r in rows:
         rides.setdefault(r["ride_id"] or r["content_hash"], []).append(r)
@@ -291,6 +322,237 @@ def _print_rides(rows, has_gps) -> None:
               f"{first['bit_depth'] or 0:>5}{gps:>5}{light:>10}")
 
 
+def _weights(spec: str | None) -> dict[str, float] | None:
+    """Parse `speed=0.5,turn=0.2` into an override on the default weights.
+
+    Only the named keys change; the rest keep their defaults. Values are
+    relative — `apply()` divides by the sum of whatever is present — so there
+    is no need to make them add up to anything.
+    """
+    if not spec:
+        return None
+    w = dict(cal_mod.WEIGHTS)
+    for part in spec.split(","):
+        key, _, value = part.partition("=")
+        key = key.strip()
+        if key not in w:
+            raise SystemExit(f"unknown weight {key!r}; expected one of "
+                             f"{', '.join(cal_mod.WEIGHTS)}")
+        try:
+            w[key] = float(value)
+        except ValueError:
+            raise SystemExit(f"weight {key!r} needs a number, got {value!r}")
+    return w
+
+
+def _show_weights(w: dict[str, float]) -> None:
+    total = sum(w.values())
+    parts = ", ".join(f"{k} {v / total:.0%}" for k, v in w.items())
+    print(f"  weights   {parts}")
+
+
+# ---------------------------------------------------------------------- score
+def _find(conn, needle: str):
+    """Match an asset by hash prefix, filename fragment, or ride number."""
+    rows = conn.execute("SELECT * FROM asset").fetchall()
+    hits = [r for r in rows
+            if r["content_hash"].startswith(needle)
+            or needle.lower() in (r["filename"] or "").lower()
+            or needle == (r["ride_id"] or "")]
+    if not hits:
+        print(f"no asset matching {needle!r}")
+        return None
+    if len(hits) > 1:
+        print(f"{needle!r} matches {len(hits)} assets:")
+        for r in hits[:10]:
+            print(f"  {r['filename']}  {r['content_hash'][:20]}")
+        return None
+    return hits[0]
+
+
+def cmd_score(args) -> int:
+    conn = db.connect()
+    if args.asset:
+        row = _find(conn, args.asset)
+        if row is None:
+            return 1
+        rows = [row]
+    else:
+        rows = [r for r in db.assets(conn) if r["telemetry_path"]]
+    if not rows:
+        print("nothing to score — run `orbitcut ingest` first")
+        return 1
+
+    print(f"{len(rows)} asset(s)\n")
+    hdr = f"{'file':<22}{'air':>5}{'total':>8}{'longest':>9}{'rough p95':>11}{'spd p95':>9}"
+    print(hdr); print("-" * len(hdr))
+    for r in rows:
+        try:
+            _, _ev, summ = score_mod.score_asset(r)
+        except Exception as exc:
+            print(f"{(r['filename'] or '')[:21]:<22}  error: {exc}")
+            continue
+        db.upsert_asset(conn, r["content_hash"],
+                        scores_path=str(config.derived_dir(r["content_hash"]) / "scores.parquet"),
+                        air_events=summ["air_events"], air_total_s=summ["air_total_s"],
+                        air_longest_s=summ["air_longest_s"])
+        db.record_stage(conn, r["content_hash"], "score", "ok", db.now())
+        sp = summ["speed_p95"]
+        print(f"{(r['filename'] or '')[:21]:<22}"
+              f"{summ['air_events']:>5}"
+              f"{summ['air_total_s']:>7.2f}s"
+              f"{summ['air_longest_s']:>8.2f}s"
+              f"{summ['rough_p95'] or 0:>11.2f}"
+              f"{(sp * 3.6 if sp else 0):>8.1f}k")
+    print("\nnext: orbitcut calibrate")
+    return 0
+
+
+def cmd_calibrate(args) -> int:
+    conn = db.connect()
+    paths = [r["scores_path"] for r in db.assets(conn) if r["scores_path"]]
+    if not paths:
+        print("nothing scored yet — run `orbitcut score`")
+        return 1
+    table = cal_mod.fit(paths)
+    p = cal_mod.save(table)
+    print(f"calibrated on {table['n_assets']} assets, "
+          f"{table['n_seconds'] / 3600:.1f} h of footage\n")
+    hdr = f"{'feature':<12}{'p50':>10}{'p90':>10}{'p99':>10}{'samples':>10}"
+    print(hdr); print("-" * len(hdr))
+    for name, f in table["features"].items():
+        b = f["breaks"]
+        print(f"{name:<12}{b[50]:>10.2f}{b[90]:>10.2f}{b[99]:>10.2f}{f['n']:>10}")
+    print(f"\nwrote {p}")
+    return 0
+
+
+def cmd_overlay(args) -> int:
+    import pandas as pd
+    conn = db.connect()
+    row = _find(conn, args.asset)
+    if row is None:
+        return 1
+    if not row["scores_path"] or not row["proxy_path"]:
+        print("that asset needs `orbitcut score` and a proxy first")
+        return 1
+
+    table = cal_mod.load()
+    if table is None:
+        print("no calibration yet — run `orbitcut calibrate` first")
+        return 1
+
+    weights = _weights(args.weights)
+    scored = cal_mod.apply(pd.read_parquet(row["scores_path"]), table, weights)
+    if weights:
+        _show_weights(weights)
+    ev_path = config.derived_dir(row["content_hash"]) / "air_events.parquet"
+    events = pd.read_parquet(ev_path) if ev_path.exists() else None
+
+    print(f"rendering {row['filename']}...")
+    out = ov_mod.render(row["proxy_path"], scored, events,
+                        row["content_hash"], row["duration_s"] or 1.0)
+
+    comp = scored["composite_s"].to_numpy()
+    top = scored.nlargest(5, "composite_s")
+    print(f"\n  composite  p50 {pd.Series(comp).median():.2f}   "
+          f"p95 {pd.Series(comp).quantile(.95):.2f}   max {pd.Series(comp).max():.2f}")
+    print("\n  best seconds")
+    for _, r in top.iterrows():
+        m, sec = divmod(int(r["t"]), 60)
+        drivers = sorted(
+            ((r.get(f"s_{k}"), k) for k in ("speed", "turn", "rough", "descent")
+             if pd.notna(r.get(f"s_{k}"))), reverse=True)[:2]
+        why = ", ".join(f"{k} {v:.2f}" for v, k in drivers)
+        if r.get("air_s", 0) > 0:
+            why = f"AIR {r['air_s']:.2f}s, " + why
+        print(f"    {m:02d}:{sec:02d}   {r['composite']:.2f}   {why}")
+    print(f"\n  wrote {out}")
+    print("  Watch it. If the curve peaks where you would have grabbed the")
+    print("  scrubber, the weights are right. If not, try another set:")
+    print("      orbitcut overlay <ride> --weights speed=0.5")
+    print("  Nothing is rescored — only the composite is recomputed.")
+    return 0
+
+
+# ----------------------------------------------------------------------- rank
+def cmd_rank(args) -> int:
+    """Rank rides against each other, so cross-ride calibration can be checked.
+
+    Within a ride the curve only has to order its own seconds. Clip selection
+    pulls from the whole library, so it also needs a boring ride's peaks to sit
+    below a good ride's peaks — a different claim, and one only you can confirm.
+    """
+    import numpy as np
+    import pandas as pd
+
+    conn = db.connect()
+    table = cal_mod.load()
+    if table is None:
+        print("no calibration yet — run `orbitcut calibrate` first")
+        return 1
+
+    weights = _weights(args.weights)
+    if weights:
+        _show_weights(weights)
+        print()
+
+    rides: dict[str, list] = {}
+    for r in db.assets(conn):
+        if r["scores_path"] and Path(r["scores_path"]).exists():
+            rides.setdefault(r["ride_id"] or r["content_hash"], []).append(r)
+    if not rides:
+        print("nothing scored yet — run `orbitcut score`")
+        return 1
+
+    rows = []
+    for ride, group in rides.items():
+        group.sort(key=lambda r: r["chapter"] or 0)
+        # Chapters are one continuous recording: concatenate before ranking,
+        # or a two-minute tail chapter competes as if it were a whole ride.
+        frames = [cal_mod.apply(pd.read_parquet(r["scores_path"]), table, weights)
+                  for r in group]
+        comp = np.concatenate([f["composite"].to_numpy() for f in frames])
+        comp = comp[np.isfinite(comp)]
+        if not len(comp):
+            continue
+        best = np.sort(comp)[::-1][:30]      # about two or three clips' worth
+        rows.append({
+            "ride": ride,
+            "chapters": len(group),
+            "dur": sum(r["duration_s"] or 0 for r in group) / 60,
+            "top30": float(best.mean()),
+            "peak": float(comp.max()),
+            "air": sum(r["air_events"] or 0 for r in group),
+            "longest": max((r["air_longest_s"] or 0) for r in group),
+            "light": group[0]["lighting"] or "-",
+        })
+
+    rows.sort(key=lambda r: r["top30"], reverse=True)
+    if args.top:
+        rows = rows[:args.top]
+
+    hdr = (f"{'ride':<8}{'ch':>3}{'dur':>8}{'top30':>8}{'peak':>7}"
+           f"{'air':>5}{'longest':>9}{'light':>10}")
+    print(hdr); print("-" * len(hdr))
+    for r in rows:
+        print(f"{r['ride']:<8}{r['chapters']:>3}{r['dur']:>7.1f}m"
+              f"{r['top30']:>8.2f}{r['peak']:>7.2f}"
+              f"{r['air']:>5}{r['longest']:>8.2f}s{r['light']:>10}")
+    print()
+    print("  top30 = mean of the ride's 30 best seconds, which is roughly what")
+    print("  clip selection would take from it. Sorted by that.")
+    print()
+    print("  Check the order against your memory of these rides. If a ride you")
+    print("  remember as dull outranks one you remember as good, the calibration")
+    print("  is the problem, not the per-second curve.")
+    if not weights:
+        print()
+        print("  To try a different balance without editing anything:")
+        print("      orbitcut rank --weights speed=0.5")
+    return 0
+
+
 # ----------------------------------------------------------------------- main
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="orbitcut", description=__doc__,
@@ -308,6 +570,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true", help="redo stages even if cached")
     p.set_defaults(fn=cmd_ingest)
 
+    p = sub.add_parser("score", help="compute telemetry features")
+    p.add_argument("asset", nargs="?", help="hash prefix, filename or ride number")
+    p.set_defaults(fn=cmd_score)
+
+    p = sub.add_parser("calibrate", help="fit the corpus distribution")
+    p.set_defaults(fn=cmd_calibrate)
+
+    p = sub.add_parser("overlay", help="render a proxy with its score curve")
+    p.add_argument("asset", help="hash prefix, filename or ride number")
+    p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
+    p.set_defaults(fn=cmd_overlay)
+
+    p = sub.add_parser("rank", help="rank rides against each other")
+    p.add_argument("--top", type=int, help="only the best N")
+    p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
+    p.set_defaults(fn=cmd_rank)
+
     p = sub.add_parser("inventory", help="what you have")
     p.add_argument("--csv", help="also write a CSV here")
     p.add_argument("--files", action="store_true",
@@ -315,7 +594,19 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_inventory)
 
     args = parser.parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except BrokenPipeError:
+        # `orbitcut inventory | head` closes the pipe under us. Exiting quietly
+        # is the correct behaviour; a traceback here just looks like a crash.
+        try:
+            sys.stdout.close()
+        except BrokenPipeError:
+            pass
+        return 0
+    except KeyboardInterrupt:
+        print("\ninterrupted")
+        return 130
 
 
 if __name__ == "__main__":

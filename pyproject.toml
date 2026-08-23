@@ -1,13 +1,16 @@
 [project]
 name = "orbitcut"
 version = "0.1.0"
-description = "GoPro MTB footage pipeline — phase 0: ingest and inventory"
+description = "GoPro mountain-bike footage pipeline — ingest, telemetry, scoring"
 requires-python = ">=3.11"
 dependencies = [
     "telemetrik>=0.1",
     "numpy>=1.26",
     "pandas>=2.1",
     "pyarrow>=15",
+    "scipy>=1.11",       # band-pass filter for the roughness feature
+    "matplotlib>=3.8",   # the score strip in `overlay`
+    "pillow>=10",        # playhead bar, and image plumbing
 ]
 
 [project.optional-dependencies]
@@ -15,6 +18,14 @@ sun = ["astral>=3.2"]
 
 [project.scripts]
 orbitcut = "orbitcut.cli:main"
+
+# Declare the package explicitly. Without this, setuptools tries to guess from
+# the directory layout and refuses as soon as the repo root holds more than one
+# candidate — which happened the moment `assets/` appeared next to `orbitcut/`.
+# Being explicit also means docs/, tests/ and anything else added later are
+# simply ignored rather than becoming a build error.
+[tool.setuptools]
+packages = ["orbitcut"]
 
 [build-system]
 requires = ["setuptools>=68"]
