@@ -33,7 +33,7 @@ STAGE_VERSIONS = {
     # 3: GPS parsed in-tree by gps.py. Versions 1 and 2 have no usable speed,
     #    altitude or cornering force — v1 had no GPS columns at all, v2 had
     #    them scaled by the latitude divisor, which zeroed them.
-    "telemetry": 5,
+    "telemetry": 4,
     "proxy": 1,
     "thumbs": 1,
     # 2: descent is a windowed slope fit, not a difference between adjacent
@@ -43,7 +43,7 @@ STAGE_VERSIONS = {
     #    rectified. v2's turn feature correlated 0.62-0.81 with roughness and
     #    read 8.6 deg/s while standing still — it was substantially a vibration
     #    meter, and the composite double-counted roughness through it.
-    "score": 4,
+    "score": 3,
     "archive": 1,
     # Selection is versioned too, so a change to clip growing or suppression can
     # be told from a change to the curve underneath it.
@@ -58,6 +58,14 @@ RESAMPLE_HZ = 10.0  # the common grid every scorer reads
 # fields). Asking for them here only produces a confusing error before the
 # working path runs.
 STREAMS = ["ACCL", "GYRO", "GRAV", "CORI", "IORI", "SHUT", "ISOE", "WBAL", "TMPC"]
+
+# A file shorter than this cannot yield a clip: selection needs CLIP_MIN_S of
+# footage plus a run-in, so anything under twenty seconds is a fragment — a
+# stopped-and-restarted recording, a pocket press. Seven such files sit in this
+# library at 0.0 to 1.2 minutes, and they were being ranked, scored and given
+# lighting labels alongside real rides, producing `nan` rows that read as
+# failures rather than as files too short to have an answer.
+MIN_RIDE_S = 20.0
 
 VIDEO_SUFFIXES = {".mp4", ".MP4", ".mov", ".MOV", ".lrv", ".LRV"}
 

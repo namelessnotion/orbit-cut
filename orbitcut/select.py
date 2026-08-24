@@ -60,6 +60,10 @@ MIN_PROMINENCE = 0.30  # share of (p95 - median) a peak must clear
 # produces six confident-looking recommendations.
 MIN_SCORE = 0.55
 DIVERSITY = 0.75  # score multiplier per earlier clip of the same type
+# The peak needs room after it. A clip that ends on its best frame reads as
+# cut off — the landing, the corner exit, the moment the dog pulls away is the
+# payoff, and a length clamp takes it first.
+MIN_TAIL_S = 4.0
 MAX_CANDIDATES = 6
 
 # Which sub-score was loudest at the peak. `s_air` is included even though
@@ -81,9 +85,47 @@ def _peaks(y: np.ndarray, floor: float) -> list[int]:
         for i in range(1, len(y) - 1)
         if y[i] >= floor and y[i] > y[i - 1] and y[i] >= y[i + 1]
     ]
+    # Both ends, or a ride that finishes on its best moment never gets
+    # considered at all — and finishing strong is not unusual on a trail that
+    # ends in a descent.
     if len(y) and y[0] >= floor and (len(y) == 1 or y[0] > y[1]):
         idx.append(0)
+    if len(y) > 1 and y[-1] >= floor and y[-1] > y[-2]:
+        idx.append(len(y) - 1)
     return sorted(idx, key=lambda i: -y[i])
+
+
+def _best_window(y: np.ndarray, lo: int, hi: int, width: int, peak: int) -> tuple[int, int]:
+    """The strongest `width` seconds inside a region too long to keep whole.
+
+    Which part of a two-minute rowdy section becomes the clip is a real choice
+    and the old code made it badly: it pinned `t_in` at `peak - (CLIP_MAX - LEAD)`,
+    which put the peak `LEAD_S` before the *end*. A thirty-second clip could put
+    its best moment at second 28.5 and cut immediately after it. The intent was
+    the opposite — `LEAD_S` exists to give a run-in.
+
+    Rather than swap one fixed offset for another, take the window with the
+    highest mean score, among those that contain the peak and leave it at least
+    `MIN_TAIL_S` to breathe. On a long plateau that picks the densest part; on a
+    single climb it lands just past the peak, which is where the payoff is.
+    """
+    first = max(lo, peak - width + int(np.ceil(MIN_TAIL_S)))
+    last = min(peak, hi - width + 1)
+    if last < first:
+        first = last = max(lo, min(peak, hi - width + 1))
+    starts = np.arange(int(first), int(last) + 1)
+    means = np.array([float(np.mean(y[s:s + width])) for s in starts])
+
+    # Ties are the normal case, not the exception: a rowdy plateau is flat by
+    # definition, so every window containing the peak scores within noise of
+    # every other. Picking the arithmetic maximum then decides on rounding
+    # error — and it chose the earliest start, which puts the peak *latest*,
+    # landing it at +26 s of a 30 s clip with only the minimum tail. So treat
+    # anything within 1% of the best as equivalent, and among those put the
+    # peak `LEAD_S` in, which is what the run-in is for.
+    close = starts[means >= means.max() - 0.01 * abs(means.max())]
+    best = int(close[np.argmin(np.abs((peak - close) - LEAD_S))])
+    return best, best + width - 1
 
 
 def _grow(y: np.ndarray, peak: int, duration: float) -> tuple[float, float]:
@@ -95,18 +137,22 @@ def _grow(y: np.ndarray, peak: int, duration: float) -> tuple[float, float]:
     while hi < len(y) - 1 and y[hi + 1] >= thresh:
         hi += 1
 
-    t_in, t_out = float(lo), float(hi + 1)
-    t_in -= LEAD_S
-    # Too short: grow symmetrically. Too long: keep the part around the peak,
-    # since that is the bit that earned the clip.
+    if (hi + 1) - lo > CLIP_MAX_S:
+        lo, hi = _best_window(y, lo, hi, int(CLIP_MAX_S), peak)
+
+    t_in, t_out = float(lo) - LEAD_S, float(hi + 1)
+    # Too short: grow symmetrically.
     if t_out - t_in < CLIP_MIN_S:
         short = CLIP_MIN_S - (t_out - t_in)
         t_in -= short / 2
         t_out += short / 2
+    # Never cut straight after the best moment. Landing a jump, exiting a
+    # corner — the second or two afterwards is what makes the clip land, and it
+    # is the first thing a length clamp eats.
+    if t_out - peak < MIN_TAIL_S:
+        t_out = min(duration, peak + MIN_TAIL_S)
     if t_out - t_in > CLIP_MAX_S:
-        centre = float(peak)
-        t_in = max(t_in, centre - (CLIP_MAX_S - LEAD_S))
-        t_out = min(t_out, t_in + CLIP_MAX_S)
+        t_in = t_out - CLIP_MAX_S
     return max(0.0, t_in), min(duration, t_out)
 
 
@@ -116,12 +162,20 @@ def _protect_air(
     """Never start or end inside a freefall window; snap outward instead."""
     if events is None or not len(events):
         return t_in, t_out
-    for _, e in events.iterrows():
-        s, t = float(e["t_start"]), float(e["t_end"])
-        if s < t_in < t:
-            t_in = s - 0.5
-        if s < t_out < t:
-            t_out = t + 0.5
+    spans = [(float(e["t_start"]), float(e["t_end"])) for _, e in events.iterrows()]
+    # Snapping out of one window can land inside the next: jumps come in
+    # sequences, and a single pass over the list left the in-point mid-air
+    # whenever two events sat within half a second of each other. Iterate to a
+    # fixed point, with a cap so a pathological chain cannot spin.
+    for _ in range(8):
+        moved = False
+        for a, b in spans:
+            if a < t_in < b:
+                t_in, moved = a - 0.5, True
+            if a < t_out < b:
+                t_out, moved = b + 0.5, True
+        if not moved:
+            break
     return max(0.0, t_in), t_out
 
 

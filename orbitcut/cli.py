@@ -846,7 +846,8 @@ def cmd_clips(args) -> int:
             if r["scores_path"] and Path(r["scores_path"]).exists()
             and (args.asset in (r["ride_id"] or "") or args.asset in (r["filename"] or "")
                  or (r["content_hash"] or "").startswith(args.asset))] if args.asset else [
-        r for r in db.assets(conn) if r["scores_path"] and Path(r["scores_path"]).exists()]
+        r for r in db.assets(conn) if r["scores_path"] and Path(r["scores_path"]).exists()
+        and (r["duration_s"] or 0) >= config.MIN_RIDE_S]
     if not rows:
         print(f"nothing scored matching {args.asset!r}" if args.asset
               else "nothing scored yet — run `orbitcut score`")
@@ -1420,7 +1421,11 @@ def cmd_rank(args) -> int:
               "  GPS will rank too highly. Re-run `orbitcut calibrate`.\n")
 
     rides: dict[str, list] = {}
+    skipped = 0
     for r in db.assets(conn):
+        if (r["duration_s"] or 0) < config.MIN_RIDE_S:
+            skipped += 1          # too short to contain a clip; see config
+            continue
         if r["scores_path"] and Path(r["scores_path"]).exists():
             rides.setdefault(r["ride_id"] or r["content_hash"], []).append(r)
     if not rides:
@@ -1487,6 +1492,9 @@ def cmd_rank(args) -> int:
     print("  Rides are ranked against others carrying the same ones, so a ride")
     print("  without GPS is not flattered by having fewer numbers to average.")
     print()
+    if skipped:
+        print(f"\n  {skipped} file(s) under {config.MIN_RIDE_S:.0f}s left out — too short to")
+        print("  hold a clip, so they have no rank to give rather than a bad one.")
     print("  Check the order against your memory of these rides. If a ride you")
     print("  remember as dull outranks one you remember as good, the calibration")
     print("  is the problem, not the per-second curve.")
