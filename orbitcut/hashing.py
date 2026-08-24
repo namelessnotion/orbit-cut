@@ -5,16 +5,17 @@ gain nothing from it: we are identifying our own footage, not defending against
 an adversary. Sample three windows plus the exact byte length instead — two
 distinct GoPro files sharing size, head, middle and tail does not happen.
 
-The algorithm name is baked into the hash string, so if you ever want a stronger
-one you can add it without invalidating what you already have.
+The algorithm name is baked into the hash string, so if we ever want a stronger
+one we can add it without invalidating what we already have.
 """
+
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
 
-CHUNK = 8 * 1024 * 1024   # 8 MiB per sampled window
-ALGO = "s3b2"             # sampled-3-window blake2b
+CHUNK = 8 * 1024 * 1024  # 8 MiB per sampled window
+ALGO = "s3b2"  # sampled-3-window blake2b
 
 
 def content_hash(path: str | Path) -> str:

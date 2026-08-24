@@ -33,7 +33,7 @@ STAGE_VERSIONS = {
     # 3: GPS parsed in-tree by gps.py. Versions 1 and 2 have no usable speed,
     #    altitude or cornering force — v1 had no GPS columns at all, v2 had
     #    them scaled by the latitude divisor, which zeroed them.
-    "telemetry": 4,
+    "telemetry": 5,
     "proxy": 1,
     "thumbs": 1,
     # 2: descent is a windowed slope fit, not a difference between adjacent
@@ -43,7 +43,7 @@ STAGE_VERSIONS = {
     #    rectified. v2's turn feature correlated 0.62-0.81 with roughness and
     #    read 8.6 deg/s while standing still — it was substantially a vibration
     #    meter, and the composite double-counted roughness through it.
-    "score": 3,
+    "score": 4,
     "archive": 1,
     # Selection is versioned too, so a change to clip growing or suppression can
     # be told from a change to the curve underneath it.

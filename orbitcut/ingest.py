@@ -1,16 +1,21 @@
 """Phase 0 orchestration.
 
 Every stage is a plain function taking a path and returning a dict. That is not
-an accident — when you eventually want these on a Celery worker, wrapping them
+an accident — when we eventually want these on a Celery worker, wrapping them
 is a decorator rather than a rewrite.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Iterator
 
-from . import (config, db, hashing, naming, probe as probe_mod, proxy as proxy_mod,
-               score as score_mod, telemetry as tel_mod, thumbs as thumbs_mod)
+from . import config, db, hashing, naming
+from . import probe as probe_mod
+from . import proxy as proxy_mod
+from . import score as score_mod
+from . import telemetry as tel_mod
+from . import thumbs as thumbs_mod
 
 
 def find_videos(root: str | Path) -> Iterator[Path]:
@@ -20,7 +25,11 @@ def find_videos(root: str | Path) -> Iterator[Path]:
         return
     for f in sorted(p.rglob("*")):
         # Skip GoPro's own low-res companions — we make our own proxies.
-        if f.is_file() and f.suffix in config.VIDEO_SUFFIXES and f.suffix.lower() != ".lrv":
+        if (
+            f.is_file()
+            and f.suffix in config.VIDEO_SUFFIXES
+            and f.suffix.lower() != ".lrv"
+        ):
             yield f
 
 
@@ -30,7 +39,8 @@ def ingest_one(path: Path, conn, force: bool = False) -> dict[str, Any]:
 
     ride_id, chapter = naming.parse(path.name)
     db.upsert_asset(
-        conn, ch,
+        conn,
+        ch,
         filename=path.name,
         source_path=str(path.resolve()),
         host=_hostname(),
@@ -71,7 +81,9 @@ def ingest_one(path: Path, conn, force: bool = False) -> dict[str, Any]:
                 "horizon_locked": tel["horizon_locked"],
             }
             if tel["gps_lat"] is not None and row["recorded_at"]:
-                elev = tel_mod.sun_elevation(tel["gps_lat"], tel["gps_lon"], row["recorded_at"])
+                elev = tel_mod.sun_elevation(
+                    tel["gps_lat"], tel["gps_lon"], row["recorded_at"]
+                )
                 fields["sun_elevation"] = elev
                 fields["lighting"] = tel_mod.lighting_label(elev)
                 fields["lighting_source"] = "sun"
@@ -79,9 +91,13 @@ def ingest_one(path: Path, conn, force: bool = False) -> dict[str, Any]:
                 # No GPS, so no solar elevation. The camera's own exposure
                 # response still says how dark it thought the scene was.
                 import pandas as _pd
-                fields["lighting"] = tel_mod.lighting_from_exposure(
-                    _pd.read_parquet(tel["telemetry_path"])
-                ) or "unknown"
+
+                fields["lighting"] = (
+                    tel_mod.lighting_from_exposure(
+                        _pd.read_parquet(tel["telemetry_path"])
+                    )
+                    or "unknown"
+                )
                 fields["lighting_source"] = "exposure"
             db.upsert_asset(conn, ch, **fields)
             db.record_stage(conn, ch, "telemetry", "ok", started)
@@ -134,16 +150,17 @@ def ingest_one(path: Path, conn, force: bool = False) -> dict[str, Any]:
         try:
             _, _events, summ = score_mod.score_asset(row)
             db.upsert_asset(
-                conn, ch,
+                conn,
+                ch,
                 scores_path=str(config.derived_dir(ch) / "scores.parquet"),
                 air_events=summ["air_events"],
                 air_total_s=summ["air_total_s"],
                 air_longest_s=summ["air_longest_s"],
             )
             db.record_stage(conn, ch, "score", "ok", started)
-            summary["stages"]["score"] = (
-                f"ok ({summ['air_events']} air, longest {summ['air_longest_s']:.2f}s)"
-            )
+            summary["stages"][
+                "score"
+            ] = f"ok ({summ['air_events']} air, longest {summ['air_longest_s']:.2f}s)"
         except Exception as exc:
             db.record_stage(conn, ch, "score", "error", started, str(exc))
             summary["stages"]["score"] = f"error: {exc}"
@@ -155,4 +172,5 @@ def ingest_one(path: Path, conn, force: bool = False) -> dict[str, Any]:
 
 def _hostname() -> str:
     import socket
+
     return socket.gethostname()

@@ -24,6 +24,7 @@ as they did on the real library. So each level is ranked against other rows
 carrying the *same* information, which asks "how good is this for what we can
 measure here" and makes the answer comparable across rides.
 """
+
 from __future__ import annotations
 
 import json
@@ -50,9 +51,9 @@ AIR_FULL_S = 0.80
 # highlight selection is for. They are taste, not correctness — phase 4's
 # approve/reject log is what eventually replaces both with fitted numbers.
 WEIGHTS = {
-    "speed": 0.50,
-    "turn": 0.30,
-    "rough": 0.20,
+    "speed": 0.2,
+    "turn": 0.2,
+    "rough": 0.6,
     # Descent is switched off, and the reason is measured rather than assumed.
     # Checked against a Trailforks profile of the trail actually ridden — 85% of
     # seconds within 20 m of it — GoPro altitude produced descents peaking at
@@ -80,7 +81,7 @@ WEIGHTS = {
 # nothing can dilute anything else. A jump on a quiet second still scores; a
 # jump during hard riding scores higher still.
 AIR_GAIN = 0.75
-AIR_DILATE_S = 1          # a jump's take-off and landing belong to it too
+AIR_DILATE_S = 1  # a jump's take-off and landing belong to it too
 CALIBRATION = "calibration.json"
 GRID = np.linspace(0, 100, 101)
 
@@ -108,15 +109,16 @@ GRID = np.linspace(0, 100, 101)
 # p=8 they take the top outright. High p leans hard toward the single best
 # feature in a second, which is the point — a highlight is a moment that is
 # outstanding at one thing, not adequate at everything.
-SHARPNESS = 8.0
+SHARPNESS = 12
 
 FEATURES = ("speed", "turn", "rough", "descent")
 SUB = {"speed": "s_speed", "turn": "s_turn", "rough": "s_rough", "descent": "s_descent"}
-MIN_BUCKET = 200          # below this, a bucket's percentiles are noise
+MIN_BUCKET = 200  # below this, a bucket's percentiles are noise
 
 
-def _level(frame: pd.DataFrame, weights: dict[str, float],
-           sharpness: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+def _level(
+    frame: pd.DataFrame, weights: dict[str, float], sharpness: float | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """Weighted mean of the present sub-scores, plus a per-row availability key.
 
     The key is a bitmask of which features contributed, and it is what makes
@@ -158,13 +160,19 @@ def _sub_scores(frame: pd.DataFrame, feats: dict[str, Any]) -> pd.DataFrame:
     lat, yaw = ranked("lat_accel"), ranked("yaw_rate")
     out["s_turn"] = np.where(np.isfinite(lat), lat, yaw)
     out["s_descent"] = ranked("grade")
-    out["s_air"] = (np.clip(out["air_s"].to_numpy(dtype=float) / AIR_FULL_S, 0, 1)
-                    if "air_s" in out else np.nan)
+    out["s_air"] = (
+        np.clip(out["air_s"].to_numpy(dtype=float) / AIR_FULL_S, 0, 1)
+        if "air_s" in out
+        else np.nan
+    )
     return out
 
 
-def fit(score_paths: list[str], weights: dict[str, float] | None = None,
-        sharpness: float | None = None) -> dict[str, Any]:
+def fit(
+    score_paths: list[str],
+    weights: dict[str, float] | None = None,
+    sharpness: float | None = None,
+) -> dict[str, Any]:
     """Build the corpus distribution for each ranked feature."""
     frames = []
     for p in score_paths:
@@ -174,8 +182,12 @@ def fit(score_paths: list[str], weights: dict[str, float] | None = None,
         raise ValueError("no scores.parquet found — run `orbitcut score` first")
     allrows = pd.concat(frames, ignore_index=True)
 
-    table: dict[str, Any] = {"n_seconds": int(len(allrows)), "n_assets": len(frames),
-                             "features": {}, "missing": {}}
+    table: dict[str, Any] = {
+        "n_seconds": int(len(allrows)),
+        "n_assets": len(frames),
+        "features": {},
+        "missing": {},
+    }
     # A feature that is absent everywhere used to drop out of this table in
     # silence, which is how a GPS column-naming bug survived a whole library:
     # every ride scored on turn and roughness alone and nothing said so. An
@@ -188,8 +200,9 @@ def fit(score_paths: list[str], weights: dict[str, float] | None = None,
         v = allrows[col].to_numpy(dtype=float)
         v = v[np.isfinite(v)]
         if len(v) < 100:
-            table["missing"][col] = (f"only {len(v)} finite samples in "
-                                     f"{len(allrows)} seconds")
+            table["missing"][col] = (
+                f"only {len(v)} finite samples in " f"{len(allrows)} seconds"
+            )
             continue
         # A feature with no spread is not a feature. Percentile-ranking a
         # constant assigns every second the same score, which then dilutes the
@@ -199,8 +212,10 @@ def fit(score_paths: list[str], weights: dict[str, float] | None = None,
         # p50 = p90 = p99 = 0.00, and a bucket claiming four features.
         lo, hi = float(np.percentile(v, 1)), float(np.percentile(v, 99))
         if not np.isfinite(hi - lo) or hi - lo <= 1e-9:
-            table["missing"][col] = (f"{len(v)} samples but no spread "
-                                     f"(p1 = p99 = {lo:.4g}) — constant, not usable")
+            table["missing"][col] = (
+                f"{len(v)} samples but no spread "
+                f"(p1 = p99 = {lo:.4g}) — constant, not usable"
+            )
             continue
         table["features"][col] = {
             "breaks": [float(x) for x in np.percentile(v, GRID)],
@@ -230,7 +245,9 @@ def fit(score_paths: list[str], weights: dict[str, float] | None = None,
         table["levels"][str(int(key))] = {
             "breaks": [float(x) for x in np.percentile(v, GRID)],
             "n": int(len(v)),
-            "features": "+".join(f for i, f in enumerate(FEATURES) if int(key) >> i & 1),
+            "features": "+".join(
+                f for i, f in enumerate(FEATURES) if int(key) >> i & 1
+            ),
         }
     if len(lv_all):
         table["levels"]["global"] = {
@@ -241,8 +258,9 @@ def fit(score_paths: list[str], weights: dict[str, float] | None = None,
     return table
 
 
-def weights_match(table: dict[str, Any] | None,
-                  weights: dict[str, float] | None) -> bool:
+def weights_match(
+    table: dict[str, Any] | None, weights: dict[str, float] | None
+) -> bool:
     """Were the table's level buckets built with these weights?
 
     Only the ratios matter, since the level divides by the sum of whatever is
@@ -282,9 +300,12 @@ def _rank(values: np.ndarray, breaks: list[float]) -> np.ndarray:
     return np.clip(np.interp(values, b, GRID / 100.0), 0.0, 1.0)
 
 
-def apply(scores: pd.DataFrame, table: dict[str, Any] | None = None,
-          weights: dict[str, float] | None = None,
-          sharpness: float | None = None) -> pd.DataFrame:
+def apply(
+    scores: pd.DataFrame,
+    table: dict[str, Any] | None = None,
+    weights: dict[str, float] | None = None,
+    sharpness: float | None = None,
+) -> pd.DataFrame:
     """Add normalised sub-scores and the composite. Returns a new frame."""
     table = table or load() or {}
     # Default to the weights the table was fitted with, not the module's. The
@@ -307,21 +328,23 @@ def apply(scores: pd.DataFrame, table: dict[str, Any] | None = None,
             if b:
                 ranked[sel] = _rank(level[sel], b["breaks"])
     else:
-        ranked = level          # uncalibrated: fall back to the raw level
+        ranked = level  # uncalibrated: fall back to the raw level
     out["level"] = ranked
 
     # Smooth the level — a clip is seconds long and single-second wobble is not
     # what anyone watches — but smooth it *before* air is folded in.
-    level_s = (pd.Series(ranked).rolling(3, center=True, min_periods=1)
-               .mean().to_numpy())
+    level_s = pd.Series(ranked).rolling(3, center=True, min_periods=1).mean().to_numpy()
 
     air = out["s_air"].to_numpy(dtype=float)
     if np.isfinite(air).any():
         # Dilate rather than average: max over a small window, so the seconds
         # either side of a jump inherit it without the jump being reduced.
-        air = (pd.Series(np.nan_to_num(air))
-               .rolling(2 * AIR_DILATE_S + 1, center=True, min_periods=1)
-               .max().to_numpy())
+        air = (
+            pd.Series(np.nan_to_num(air))
+            .rolling(2 * AIR_DILATE_S + 1, center=True, min_periods=1)
+            .max()
+            .to_numpy()
+        )
     else:
         air = np.zeros(len(out))
     out["s_air_d"] = air
