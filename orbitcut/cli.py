@@ -1107,12 +1107,119 @@ def cmd_retime(args) -> int:
     return 0
 
 
+def _decision_rows(conn) -> list[dict]:
+    """Every hand-made decision, with the context needed to read it later."""
+    import json as _json
+
+    assets = {a["content_hash"]: a for a in db.assets(conn)}
+    out = []
+    for r in db.segments(conn):
+        if r["status"] == "candidate":
+            continue
+        a = assets.get(r["content_hash"]) or {}
+        try:
+            feats = _json.loads(r["features"] or "{}")
+        except (ValueError, TypeError):
+            feats = {}
+        out.append({
+            "filename": a["filename"] if a else None,
+            "ride_id": a["ride_id"] if a else None,
+            "chapter": a["chapter"] if a else None,
+            "content_hash": r["content_hash"],
+            "t_in": r["t_in"], "t_out": r["t_out"],
+            "t_in_user": r["t_in_user"], "t_out_user": r["t_out_user"],
+            "status": r["status"], "reason": r["reason"],
+            "dominant": r["dominant"], "score": r["score"], "rank": r["rank"],
+            "features": feats,
+            "decided_at": r["decided_at"],
+            # Ride context, so a decision stays readable when the database has
+            # moved on: which ride, shot how, and how long it ran.
+            "style": a["style"] if a else None,
+            "mount": a["mount"] if a else None,
+            "lighting": a["lighting"] if a else None,
+            "recorded_at": a["recorded_at"] if a else None,
+            "duration_s": a["duration_s"] if a else None,
+        })
+    return out
+
+
+def _export_decisions(conn, path: Path) -> int:
+    """Write the decision log to `path`. Returns the number of rows."""
+    import json as _json
+
+    rows = _decision_rows(conn)
+    table = cal_mod.load() or {}
+    payload = {
+        "format": "orbitcut-decisions/1",
+        "exported_at": db.now(),
+        "n": len(rows),
+        # Provenance, with a caveat that matters: this is the calibration in
+        # force *now*, which is not necessarily the one these decisions were
+        # made against. Weights and the turn feature both changed after most of
+        # them were recorded. It is recorded anyway because knowing what the
+        # curve looked like at export time is better than knowing nothing.
+        "calibration_now": {"weights": table.get("weights"),
+                            "sharpness": table.get("sharpness")},
+        "stage_versions": dict(config.STAGE_VERSIONS),
+        "note": ("Hand-made approve/reject decisions. These are the only "
+                 "artefact in orbitcut that cannot be regenerated from the "
+                 "footage — everything else is derived."),
+        "decisions": rows,
+    }
+    path.write_text(_json.dumps(payload, indent=2, default=str))
+    return len(rows)
+
+
 def cmd_log(args) -> int:
     """What the decision log holds, and what it is enough for yet."""
     import json as _json
     import numpy as np
 
     conn = db.connect()
+
+    if getattr(args, "export", None) or getattr(args, "restart", None):
+        dest = Path(args.export or args.restart).expanduser()
+        try:
+            n = _export_decisions(conn, dest)
+        except OSError as exc:
+            # Fail before anything is cleared, and say why in one line rather
+            # than a traceback: this is the command standing between you and
+            # the only unrecoverable table in the system.
+            print(f"  ! could not write {dest}: {exc.strerror or exc}")
+            print("  nothing was exported and nothing was cleared.")
+            return 1
+        print(f"  wrote {n} decision(s) to {dest}")
+        if not args.restart:
+            return 0
+        if not n:
+            print("  nothing to clear.")
+            return 0
+
+        # Read it back before touching anything. An export that was not
+        # verified is not a backup, it is a hope — and this is the one table
+        # in the system that cannot be rebuilt from the footage.
+        try:
+            back = _json.loads(dest.read_text())
+            got = len(back.get("decisions", []))
+        except Exception as exc:
+            print(f"  ! could not read the export back ({exc}) — nothing cleared")
+            return 1
+        if got != n or back.get("format") != "orbitcut-decisions/1":
+            print(f"  ! export reads back as {got} row(s), expected {n} — "
+                  f"nothing cleared")
+            return 1
+        approved = sum(1 for d in back["decisions"] if d["status"] == "approved")
+        print(f"  verified: {got} rows read back, {approved} of them approvals")
+
+        cur = conn.execute(
+            "UPDATE segment SET status='candidate', reason=NULL, t_in_user=NULL,"
+            " t_out_user=NULL, decided_at=NULL WHERE status != 'candidate'")
+        conn.commit()
+        print(f"  cleared {cur.rowcount} decision(s) — the segments stay, so")
+        print("  `orbitcut clips` will now rewrite them all against the new curve.")
+        print("\n  Next:  orbitcut clips && orbitcut review")
+        return 0
+
     rows = db.segments(conn)
     if not rows:
         print("no candidates yet — run `orbitcut clips`")
@@ -1632,7 +1739,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="show what would change without writing")
     p.set_defaults(fn=cmd_retime)
 
-    sub.add_parser("log", help="what the decision log holds").set_defaults(fn=cmd_log)
+    p = sub.add_parser("log", help="what the decision log holds")
+    p.add_argument("--export", metavar="FILE",
+                   help="write every decision to a JSON file and stop")
+    p.add_argument("--restart", metavar="FILE",
+                   help="export to FILE, read it back to check it, and only "
+                        "then clear the decisions")
+    p.set_defaults(fn=cmd_log)
 
     p = sub.add_parser("fit", help="fit weights on your approve/reject decisions")
     p.add_argument("--seed", type=int, default=0, help="fold shuffle seed")
