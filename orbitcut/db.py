@@ -58,6 +58,27 @@ CREATE TABLE IF NOT EXISTS asset (
     first_seen     TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS segment (
+    id            INTEGER PRIMARY KEY,
+    content_hash  TEXT NOT NULL,
+    t_in          REAL NOT NULL,
+    t_out         REAL NOT NULL,
+    rank          INTEGER,
+    score         REAL,
+    dominant      TEXT,             -- speed | turn | rough | jump
+    features      TEXT,             -- json: the full vector, for the decision log
+    status        TEXT DEFAULT 'candidate',   -- candidate|approved|rejected|rendered
+    reason        TEXT,             -- reject reason chip, when there is one
+    t_in_user     REAL,             -- where you moved the in-point to
+    t_out_user    REAL,             -- ...and the out-point
+    decided_at    TEXT,
+    stage_version INTEGER DEFAULT 1,
+    -- One row per (asset, in-point). Re-running selection replaces candidates
+    -- rather than accumulating duplicates, but an ON CONFLICT update must never
+    -- clobber a decision you already made — see replace_candidates().
+    UNIQUE (content_hash, t_in)
+);
+
 CREATE TABLE IF NOT EXISTS stage_run (
     content_hash  TEXT NOT NULL,
     stage         TEXT NOT NULL,
@@ -75,6 +96,8 @@ INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_asset_recorded ON asset(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_asset_ride     ON asset(ride_id, chapter);
 CREATE INDEX IF NOT EXISTS idx_stage_status   ON stage_run(stage, status);
+CREATE INDEX IF NOT EXISTS idx_segment_asset  ON segment(content_hash, rank);
+CREATE INDEX IF NOT EXISTS idx_segment_status ON segment(status);
 """
 
 
@@ -198,6 +221,52 @@ def stage_done(conn: sqlite3.Connection, content_hash: str, stage: str) -> bool:
     if row is None:
         return False
     return row["status"] == "ok" and row["stage_version"] >= config.STAGE_VERSIONS[stage]
+
+
+def replace_candidates(conn: sqlite3.Connection, content_hash: str,
+                       clips: list[dict]) -> tuple[int, int]:
+    """Store a fresh set of candidates, preserving anything already decided.
+
+    Re-running selection after a weight change is expected and should be cheap,
+    but the decision log is the one thing in this system that cannot be
+    regenerated — every approve and reject is a hand-made label. So undecided
+    candidates are cleared and rewritten, and decided ones are left exactly
+    where they are, even when the new selection disagrees about the in-point.
+
+    Returns (written, kept).
+    """
+    kept = conn.execute(
+        "SELECT COUNT(*) FROM segment WHERE content_hash = ? AND status != 'candidate'",
+        (content_hash,)).fetchone()[0]
+    conn.execute("DELETE FROM segment WHERE content_hash = ? AND status = 'candidate'",
+                 (content_hash,))
+
+    written = 0
+    for c in clips:
+        try:
+            conn.execute(
+                """INSERT INTO segment
+                       (content_hash, t_in, t_out, rank, score, dominant, features)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (content_hash, c["t_in"], c["t_out"], c.get("rank"), c.get("score"),
+                 c.get("dominant"), json.dumps(c.get("features", {}))))
+            written += 1
+        except sqlite3.IntegrityError:
+            # A decided segment already owns this in-point. Leave it alone.
+            continue
+    conn.commit()
+    return written, kept
+
+
+def segments(conn: sqlite3.Connection, content_hash: str | None = None,
+             status: str | None = None) -> list[sqlite3.Row]:
+    sql = "SELECT * FROM segment WHERE 1=1"
+    args: list[Any] = []
+    if content_hash:
+        sql += " AND content_hash = ?"; args.append(content_hash)
+    if status:
+        sql += " AND status = ?"; args.append(status)
+    return conn.execute(sql + " ORDER BY content_hash, rank, t_in", args).fetchall()
 
 
 def stale_stage(conn: sqlite3.Connection, stage: str) -> list[str]:
