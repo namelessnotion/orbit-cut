@@ -41,15 +41,26 @@ RANKED = ("speed_ms", "rough", "yaw_rate", "lat_accel", "grade")
 # Absolute scale: seconds of air that counts as a full-marks jump.
 AIR_FULL_S = 0.80
 
-# Starting weights. Replace these with values fitted to your own approve/reject
-# decisions once phase 4's log has a hundred or so in it — that is the whole
-# point of recording them.
-# Continuous features only — see AIR_GAIN for why airtime is not in here.
-# Set from Anthony's own judgement of the ranking against rides he remembers:
-# speed carries half, and SHARPNESS is 8. Together those say "a ride with one
-# real sprint beats a ride that is merely brisk throughout", which is what
-# highlight selection is for. They are taste, not correctness — phase 4's
-# approve/reject log is what eventually replaces both with fitted numbers.
+# Weights, set by ear against rides Anthony remembers. Continuous features only
+# — see AIR_GAIN for why airtime is not in here.
+#
+# These moved a long way once the turn feature stopped being a vibration meter.
+# The earlier note here described speed carrying half and said the point was
+# "a ride with one real sprint beats a ride that is merely brisk throughout";
+# that rationale outlived the numbers it justified, which is worse than no
+# rationale, so it is gone. Roughness now carries most of the composite.
+#
+# Worth being clear about what that means, because it looks like a regression
+# and is not. `turn` used to correlate 0.62-0.81 with `rough`, so a roughness-
+# heavy result was arriving through a feature that claimed to measure
+# cornering. Now the two are close to independent and the weighting says
+# outright that terrain is what makes this footage worth watching — which is a
+# plausible thing for bikejoring on Michigan singletrack, where the dog sets a
+# fairly even pace and the trail supplies the variation.
+#
+# Still taste, not correctness, and still provisional: the approve/reject log
+# is what eventually replaces both these and SHARPNESS with fitted numbers.
+# `orbitcut fit` already knows how to check whether it can beat them.
 WEIGHTS = {
     "speed": 0.2,
     "turn": 0.2,
@@ -104,11 +115,16 @@ GRID = np.linspace(0, 100, 101)
 #
 # This is the same lesson AIR_GAIN already encodes for airtime — different kinds
 # of evidence must not be averaged into each other — applied one level up.
-# 8.0, chosen against the real library rather than a simulation: at p=5 with
-# speed at half, sprint rides still interleaved with the consistent ones; at
-# p=8 they take the top outright. High p leans hard toward the single best
-# feature in a second, which is the point — a highlight is a moment that is
-# outstanding at one thing, not adequate at everything.
+# Chosen against the real library rather than a simulation. High p leans hard
+# toward the single best feature in a second, which is the point — a highlight
+# is a moment that is outstanding at one thing, not adequate at everything.
+#
+# The original 8.0 was picked when speed carried half the weight, to stop
+# sprint rides interleaving with merely-consistent ones. With one feature now
+# carrying most of the composite, sharpness does less work than it did: a power
+# mean over weights of 0.2/0.2/0.6 is already close to "whatever rough says".
+# It is kept high because it still separates a specialised second from an
+# adequate one on the two minor features.
 SHARPNESS = 12
 
 FEATURES = ("speed", "turn", "rough", "descent")
