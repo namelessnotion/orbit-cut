@@ -66,7 +66,6 @@ MAX_CANDIDATES = 6
 # airtime is not in the weighted level: a jump is what a clip is *about* when
 # there is one, whatever the arithmetic says.
 TYPES = {"s_speed": "speed", "s_turn": "turn", "s_rough": "rough", "s_air_d": "jump"}
-STAGE_VERSION = 1
 
 
 def _peaks(y: np.ndarray, floor: float) -> list[int]:

@@ -93,6 +93,38 @@ def _columns_for(key: str, values: list[Any]) -> dict[str, np.ndarray]:
     return {name: np.array([float(v) if v is not None else np.nan for v in values])}
 
 
+MAX_GPS_GAP_S = 5.0
+# How long a GPS dropout may be before the bridge across it stops counting as a
+# measurement. `np.interp` will happily draw a straight line across a two-minute
+# canopy dropout and hold the first and last values flat beyond the ends, and
+# the parquet keeps no record of which grid seconds were actually measured — so
+# a fabricated speed is indistinguishable from a real one downstream. Five
+# seconds is short enough that nothing real is lost and long enough to bridge
+# the odd missed sample.
+
+
+def _gap_aware_interp(grid: np.ndarray, t: np.ndarray,
+                      v: np.ndarray) -> np.ndarray:
+    """Interpolate onto `grid`, but leave NaN where nothing was measured.
+
+    Absence has to stay visible. This project has twice paid for a pipeline that
+    degraded quietly — the GPS column naming and the corpus that renormalised
+    over missing features — and an interpolated dropout is the same failure in a
+    new place: it does not look like missing data, it looks like a slow steady
+    crawl in a straight line.
+    """
+    out = np.interp(grid, t, v)
+    # Outside the measured span entirely: np.interp clamps, which invents a
+    # stationary receiver for as long as the ride keeps going.
+    out[(grid < t[0]) | (grid > t[-1])] = np.nan
+    if len(t) > 1:
+        i = np.searchsorted(t, grid, side="right")
+        prev = np.clip(i - 1, 0, len(t) - 1)
+        nxt = np.clip(i, 0, len(t) - 1)
+        out[np.where(t[nxt] - t[prev] > MAX_GPS_GAP_S, True, False)] = np.nan
+    return out
+
+
 def extract(path: str | Path, content_hash: str) -> dict[str, Any]:
     import telemetrik
 
@@ -135,6 +167,7 @@ def extract(path: str | Path, content_hash: str) -> dict[str, Any]:
 
     # GPS is parsed here rather than by telemetrik, for both stream types and
     # for different reasons — see gps.py. This deliberately runs last and
+
     # overwrites any gps_* columns already in `frame`: telemetrik's GPS5 values
     # are scaled by a single divisor, which leaves latitude and longitude right
     # and everything else wrong by orders of magnitude.
@@ -148,7 +181,7 @@ def extract(path: str | Path, content_hash: str) -> dict[str, Any]:
         for name, col in fix["columns"].items():
             good = np.isfinite(col)
             if good.sum() >= 2:
-                frame[name] = np.interp(grid, fix["t"][good], col[good])
+                frame[name] = _gap_aware_interp(grid, fix["t"][good], col[good])
         if fix["key"] not in present:
             present = sorted(present + [fix["key"]])
         span = float(fix["t"][-1] - fix["t"][0]) if fix["n"] > 1 else 0.0

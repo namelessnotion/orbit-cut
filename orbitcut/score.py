@@ -4,7 +4,7 @@ Five features, all from sensors, none from pixels:
 
     air_s       seconds of freefall in this second      ACCL @ 200 Hz
     rough       high-band vibration, m/s^2 RMS          ACCL @ 200 Hz
-    yaw_rate    heading change, rad/s                   GYRO . GRAV
+    yaw_rate    cornering rate, rad/s                   GYRO . GRAV, <1 Hz
     lat_accel   cornering force, m/s^2                  yaw_rate x speed
     speed_ms    ground speed                            GPS
     grade       descent, m/s vertical                   GPS altitude
@@ -33,7 +33,7 @@ import pandas as pd
 from scipy.ndimage import median_filter
 from scipy.signal import butter, sosfiltfilt
 
-from . import config
+from . import config, telemetry as tel_mod
 
 # --- airtime ---------------------------------------------------------------
 # In freefall an accelerometer reads ~0: the sensor and its case fall together.
@@ -46,6 +46,12 @@ AIR_LANDING_G = 18.0     # m/s^2 — a landing spike must follow, or it wasn't a
 AIR_LANDING_WINDOW = 0.6 # seconds after touchdown to look for that spike
 
 ROUGH_BAND = (5.0, 40.0)  # Hz — chatter and impacts, above body movement
+
+# --- turning ---------------------------------------------------------------
+# A trail corner takes seconds; nothing about cornering lives above 1 Hz. The
+# gyro's other 200 Hz of bandwidth is the trail shaking the camera, and it has
+# to be filtered out *before* the signal is rectified — see `turn_rate`.
+TURN_CUTOFF_HZ = 1.0
 
 # --- descent ---------------------------------------------------------------
 # GPS altitude is the least accurate thing a GoPro records: metres of noise per
@@ -80,7 +86,6 @@ GPS_DOP_MAX = 6.0        # dilution of precision above this is not a fix worth u
 # canopy, receiver re-acquiring — because the bound scales with speed.
 MAX_GRADIENT = 0.60      # rise/run; ~31 degrees, far past anything rideable
 MAX_DESCENT_MS = 3.0     # absolute fallback when speed is unknown
-STAGE_VERSION = 3
 
 
 def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
@@ -125,7 +130,15 @@ def detect_air(imu: pd.DataFrame) -> list[dict[str, float]]:
 
 
 def roughness(imu: pd.DataFrame, grid: np.ndarray) -> np.ndarray:
-    """RMS of the 5-40 Hz band of |accel|, per second of the grid."""
+    """RMS of the 5-40 Hz band of |accel|, per second of the grid.
+
+    One NaN sample used to cost the whole ride. `sosfiltfilt` propagates a NaN
+    across its entire output, and `_columns_for` emits a NaN row for a malformed
+    GPMF sample, so a single bad sample in a twelve-minute file silently turned
+    every second's roughness into NaN — and the composite then renormalised over
+    the remaining features and carried on looking healthy. Bridge the gaps
+    before filtering, and refuse only when there is too little left to trust.
+    """
     cols = [c for c in imu.columns if c.startswith("accl_")]
     if len(cols) != 3 or len(imu) < 64:
         return np.full(len(grid), np.nan)
@@ -134,6 +147,14 @@ def roughness(imu: pd.DataFrame, grid: np.ndarray) -> np.ndarray:
     rate = len(t) / max(t[-1] - t[0], 1e-6)
     if rate < 2 * ROUGH_BAND[1]:
         return np.full(len(grid), np.nan)
+
+    bad = ~np.isfinite(mag)
+    if bad.any():
+        if bad.mean() > 0.02:
+            print(f"  ! roughness: {bad.mean():.0%} of accelerometer samples are "
+                  f"unusable — reporting no roughness rather than filtering noise")
+            return np.full(len(grid), np.nan)
+        mag = np.interp(t, t[~bad], mag[~bad])
 
     sos = butter(4, ROUGH_BAND, btype="band", fs=rate, output="sos")
     band = sosfiltfilt(sos, mag - np.nanmean(mag))
@@ -147,21 +168,98 @@ def roughness(imu: pd.DataFrame, grid: np.ndarray) -> np.ndarray:
     return out
 
 
-def yaw_rate(tel: pd.DataFrame) -> np.ndarray:
-    """Angular velocity about the gravity axis — i.e. how fast heading changes.
+def _signed_yaw(t: np.ndarray, gyro: np.ndarray,
+                grav_t: np.ndarray, grav: np.ndarray) -> np.ndarray:
+    """Angular velocity about the gravity axis, keeping its sign.
 
     Projecting GYRO onto the unit gravity vector sidesteps the axis-order
     problem entirely, and is the physically correct definition of turning.
+    Gravity is interpolated onto the gyro's own timeline rather than the other
+    way around: gravity is a smooth 30 Hz signal and interpolating it costs
+    nothing, while point-sampling a 200 Hz gyro down to 10 Hz is what caused the
+    problem this function exists to fix.
     """
-    gyro = [c for c in tel.columns if c.startswith("gyro_")]
-    grav = [c for c in tel.columns if c.startswith("grav_")]
-    if len(gyro) != 3 or len(grav) != 3:
-        return np.full(len(tel), np.nan)
-    g = tel[grav].to_numpy(dtype=float)
-    n = np.linalg.norm(g, axis=1, keepdims=True)
-    g = np.divide(g, n, out=np.zeros_like(g), where=n > 1e-6)
-    w = tel[gyro].to_numpy(dtype=float)
-    return np.abs((w * g).sum(axis=1))
+    n = np.linalg.norm(grav, axis=1, keepdims=True)
+    g = np.divide(grav, n, out=np.zeros_like(grav), where=n > 1e-6)
+    gi = np.column_stack([np.interp(t, grav_t, g[:, k]) for k in range(3)])
+    m = np.linalg.norm(gi, axis=1, keepdims=True)
+    gi = np.divide(gi, m, out=np.zeros_like(gi), where=m > 1e-6)
+    return (gyro * gi).sum(axis=1)
+
+
+def turn_rate(imu: pd.DataFrame | None, tel: pd.DataFrame,
+              grid: np.ndarray) -> np.ndarray:
+    """Cornering rate in rad/s, per second of the grid.
+
+    **The obvious version of this was a vibration meter.** It projected GYRO
+    onto gravity on the 10 Hz grid, took the absolute value, and averaged per
+    second. Two mistakes compounded. Point-sampling 200 Hz gyro to 10 Hz with no
+    anti-alias filter folded trail chatter into the "yaw" series; then
+    rectifying before averaging turned that zero-mean noise into a positive
+    floor that scales with how rough the trail is.
+
+    Measured on three rides, the old feature correlated **+0.62 to +0.81 with
+    roughness** and read 0.150 rad/s — 8.6 deg/s of "turning" — while standing
+    still. Its 90th percentile was only 1.6-1.9x its median: almost no dynamic
+    range left after the floor, so it could not rank a corner above a straight.
+    Since the turn weight is 0.30 and roughness carries 0.20, the composite was
+    also double-counting roughness at half again its intended weight.
+
+    The fix is to filter *before* rectifying, and to do it at native rate.
+    Cornering lives well under 1 Hz — a trail corner takes seconds — so a 1 Hz
+    low-pass on the signed rate keeps all of it and discards the chatter. Same
+    three rides: correlation with roughness drops to **+0.13 to +0.29** and
+    p90/p50 rises to **3.0-3.3**.
+
+    The other candidate was per-second |net heading change|, the integral of the
+    signed rate, which lets rectified noise cancel instead of accumulate. It
+    scores slightly better on both headline numbers and is wrong anyway: on this
+    footage **67-74% of seconds contain a direction reversal** even after
+    low-passing, and on those it discards 29-34% of the magnitude. Its better
+    ratio is partly that cancellation flattering it. Singletrack is a sequence
+    of linked turns; a feature that reads a quick left-right as no turning at
+    all is measuring the wrong thing.
+    """
+    gy = [c for c in (imu.columns if imu is not None else [])
+          if c.startswith("gyro_")]
+    gv = [c for c in tel.columns if c.startswith("grav_")]
+    if len(gv) != 3 or "t" not in tel:
+        return np.full(len(grid), np.nan)
+
+    if imu is not None and len(gy) == 3 and len(imu) > 64:
+        t = imu["t"].to_numpy(dtype=float)
+        w = imu[gy].to_numpy(dtype=float)
+    else:
+        # No raw IMU: fall back to the 10 Hz grid, still filtered before
+        # rectifying. Aliasing is already baked into those samples so this is
+        # the weaker path, but it is much better than not filtering.
+        gy = [c for c in tel.columns if c.startswith("gyro_")]
+        if len(gy) != 3:
+            return np.full(len(grid), np.nan)
+        t = tel["t"].to_numpy(dtype=float)
+        w = tel[gy].to_numpy(dtype=float)
+
+    ok = np.isfinite(w).all(axis=1) & np.isfinite(t)
+    if ok.sum() < 64:
+        return np.full(len(grid), np.nan)
+    t, w = t[ok], w[ok]
+    signed = _signed_yaw(t, w, tel["t"].to_numpy(dtype=float),
+                         tel[gv].to_numpy(dtype=float))
+
+    rate = len(t) / max(t[-1] - t[0], 1e-6)
+    if rate > 2.5 * TURN_CUTOFF_HZ:
+        sos = butter(2, TURN_CUTOFF_HZ, btype="low", fs=rate, output="sos")
+        signed = sosfiltfilt(sos, signed)
+
+    # Rectify only now, and average per second.
+    sec = np.floor(t).astype(int)
+    keep = (sec >= 0) & (sec < len(grid)) & np.isfinite(signed)
+    if not keep.any():
+        return np.full(len(grid), np.nan)
+    n = np.bincount(sec[keep], minlength=len(grid))
+    total = np.bincount(sec[keep], weights=np.abs(signed[keep]),
+                        minlength=len(grid))
+    return np.where(n > 0, total / np.maximum(n, 1), np.nan)
 
 
 def descent_rate(alt: np.ndarray) -> np.ndarray:
@@ -217,31 +315,31 @@ def bound_by_speed(grade: np.ndarray, speed: np.ndarray) -> tuple[np.ndarray, fl
 def compute(telemetry_path: str, imu_path: str | None, duration_s: float) -> pd.DataFrame:
     """One row per second of the ride. Raw physical units throughout."""
     tel = pd.read_parquet(telemetry_path)
+    # Loaded up front: turning needs the gyro at its native rate, not the 10 Hz
+    # resample, so this is no longer only the accelerometer's business.
+    imu = (pd.read_parquet(imu_path)
+           if imu_path and Path(imu_path).exists() else None)
     grid = np.arange(0.0, max(duration_s, 1.0), 1.0)
     out = pd.DataFrame({"t": grid})
 
     def on_grid(col: str) -> np.ndarray:
+        """A 10 Hz column onto the one-second grid, without re-bridging gaps.
+
+        `telemetry` NaNs out GPS spans longer than a few seconds because nothing
+        was measured there. Interpolating here over only the finite samples
+        would quietly undo that — the hole would be filled a second time, one
+        stage later, and look like data again.
+        """
         if col not in tel.columns:
             return np.full(len(grid), np.nan)
         v = tel[col].to_numpy(dtype=float)
         good = np.isfinite(v)
         if good.sum() < 2:
             return np.full(len(grid), np.nan)
-        return np.interp(grid, tel["t"].to_numpy()[good], v[good])
+        return tel_mod._gap_aware_interp(grid, tel["t"].to_numpy()[good], v[good])
 
     # --- turning ------------------------------------------------------------
-    yr = yaw_rate(tel)
-    if np.isfinite(yr).any():
-        tt = tel["t"].to_numpy()
-        good = np.isfinite(yr)
-        # Mean over each second, not a sample: a turn is a second-long event.
-        out["yaw_rate"] = [
-            float(np.nanmean(yr[good][(tt[good] >= s) & (tt[good] < s + 1)]))
-            if ((tt[good] >= s) & (tt[good] < s + 1)).any() else np.nan
-            for s in grid
-        ]
-    else:
-        out["yaw_rate"] = np.nan
+    out["yaw_rate"] = turn_rate(imu, tel, grid)
 
     # --- speed and descent (GPS only) --------------------------------------
     speed = on_grid("gps_speed2d")
@@ -283,8 +381,7 @@ def compute(telemetry_path: str, imu_path: str | None, duration_s: float) -> pd.
     out["lat_accel"] = out["yaw_rate"] * out["speed_ms"]
 
     # --- accelerometer features --------------------------------------------
-    if imu_path and Path(imu_path).exists():
-        imu = pd.read_parquet(imu_path)
+    if imu is not None:
         out["rough"] = roughness(imu, grid)
         air = np.zeros(len(grid))
         for ev in detect_air(imu):

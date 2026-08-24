@@ -39,8 +39,15 @@ STAGE_VERSIONS = {
     # 2: descent is a windowed slope fit, not a difference between adjacent
     #    seconds. The old one measured GPS altitude noise (correlation 0.26
     #    with real descent) and fed it 14% of the composite.
-    "score": 2,
+    # 3: turn is low-passed below 1 Hz on the native-rate gyro before it is
+    #    rectified. v2's turn feature correlated 0.62-0.81 with roughness and
+    #    read 8.6 deg/s while standing still — it was substantially a vibration
+    #    meter, and the composite double-counted roughness through it.
+    "score": 3,
     "archive": 1,
+    # Selection is versioned too, so a change to clip growing or suppression can
+    # be told from a change to the curve underneath it.
+    "select": 1,
 }
 
 # --- telemetry ---------------------------------------------------------------
