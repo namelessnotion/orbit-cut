@@ -792,6 +792,475 @@ def cmd_overlay(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------- clips
+def _scored_for(row, table, args):
+    import pandas as pd
+    return cal_mod.apply(pd.read_parquet(row["scores_path"]), table,
+                         _weights(getattr(args, "weights", None)),
+                         getattr(args, "sharpness", None))
+
+
+def cmd_clips(args) -> int:
+    """Pick the candidate clips for a ride and store them."""
+    import pandas as pd
+    from . import select as sel_mod
+
+    conn = db.connect()
+    table = cal_mod.load()
+    if table is None:
+        print("no calibration yet — run `orbitcut calibrate` first")
+        return 1
+
+    rows = [r for r in db.assets(conn)
+            if r["scores_path"] and Path(r["scores_path"]).exists()
+            and (args.asset in (r["ride_id"] or "") or args.asset in (r["filename"] or "")
+                 or (r["content_hash"] or "").startswith(args.asset))] if args.asset else [
+        r for r in db.assets(conn) if r["scores_path"] and Path(r["scores_path"]).exists()]
+    if not rows:
+        print(f"nothing scored matching {args.asset!r}" if args.asset
+              else "nothing scored yet — run `orbitcut score`")
+        return 1
+
+    total_written = total_kept = 0
+    hdr = (f"{'file':<20}{'#':>3}{'in':>9}{'out':>9}{'len':>7}{'score':>7}{'type':>8}")
+    print(hdr); print("-" * len(hdr))
+    for r in sorted(rows, key=lambda r: (r["ride_id"] or "", r["chapter"] or 0)):
+        scored = _scored_for(r, table, args)
+        ev_path = config.derived_dir(r["content_hash"]) / "air_events.parquet"
+        events = pd.read_parquet(ev_path) if ev_path.exists() else None
+        clips = sel_mod.candidates(scored, events, r["duration_s"] or 1.0, args.top)
+        written, kept = db.replace_candidates(conn, r["content_hash"], clips)
+        total_written += written; total_kept += kept
+        if not clips:
+            print(f"{(r['filename'] or '')[:19]:<20}  nothing clears the bar")
+            continue
+        for c in clips:
+            print(f"{(r['filename'] or '')[:19]:<20}{c['rank']:>3}{c['t_in']:>9.1f}"
+                  f"{c['t_out']:>9.1f}{c['duration']:>7.1f}{c['score']:>7.2f}"
+                  f"{c['dominant']:>8}")
+
+    print(f"\n  {total_written} candidate(s) stored"
+          + (f", {total_kept} already-decided segment(s) left untouched" if total_kept else ""))
+    print("  A ride with nothing above the bar is a real answer, not a failure —")
+    print("  the composite is calibrated against your whole library, so a clip")
+    print("  has to beat the median second you have ever shot.")
+    print("\n  next: orbitcut reel <ride>   — watch them before trusting them")
+    return 0
+
+
+def cmd_reel(args) -> int:
+    from . import reel as reel_mod
+
+    conn = db.connect()
+    row = _find(conn, args.asset)
+    if row is None:
+        return 1
+    if not row["proxy_path"] or not Path(row["proxy_path"]).exists():
+        print("that asset has no proxy — run `orbitcut ingest` first")
+        return 1
+    segs = [s for s in db.segments(conn, row["content_hash"])
+            if s["status"] in ("candidate", "approved")]
+    if not segs:
+        print(f"no candidates stored for {row['filename']} — run `orbitcut clips` first")
+        return 1
+
+    clips = [{"t_in": s["t_in"], "t_out": s["t_out"], "score": s["score"] or 0.0,
+              "dominant": s["dominant"] or "unknown"} for s in segs]
+    print(f"rendering {len(clips)} clip(s) from {row['filename']}...")
+    out = reel_mod.build(row["proxy_path"], clips, row["content_hash"],
+                         row["ride_id"] or row["content_hash"][:8])
+    total = sum(c["t_out"] - c["t_in"] for c in clips)
+    print(f"\n  wrote {out}")
+    print(f"  {len(clips)} clips, {total:.0f}s total\n")
+    print("  Watch it. The things to judge, in order:")
+    print("    does each clip start early enough to see the action coming?")
+    print("    does any clip end mid-corner or mid-jump?")
+    print("    are these the moments you would have picked from this ride?")
+    print("    is anything good missing entirely?")
+    return 0
+
+
+def cmd_review(args) -> int:
+    """Serve the review UI until you stop it."""
+    import time
+    from . import review as rev_mod
+
+    conn = db.connect()
+    server, url, n = rev_mod.serve(conn, args.asset, args.port,
+                                   open_browser=not args.no_open)
+    if server is None:
+        print("no candidates to review — run `orbitcut clips` first")
+        return 1
+
+    print(f"\n  reviewing {n} candidate(s) at {url}")
+    print("  j/k move   a approve   x reject   1-5 reject with a reason")
+    print("  [ ] move the in-point   - = move the out-point   u undo")
+    print("\n  Decisions are written as you make them, so closing this is safe.")
+    print("  Ctrl-C to stop.\n")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+
+    done = conn.execute("SELECT status, COUNT(*) c FROM segment "
+                        "WHERE status != 'candidate' GROUP BY status").fetchall()
+    if done:
+        print("\n  " + ",  ".join(f"{r['c']} {r['status']}" for r in done))
+        print("  Every one of those is a labelled example: feature vector -> your")
+        print("  taste. At around 100-150 a fit on this log beats the hand-set")
+        print("  weights, which is the point of recording it.")
+    return 0
+
+
+def cmd_log(args) -> int:
+    """What the decision log holds, and what it is enough for yet."""
+    import json as _json
+    import numpy as np
+
+    conn = db.connect()
+    rows = db.segments(conn)
+    if not rows:
+        print("no candidates yet — run `orbitcut clips`")
+        return 1
+    decided = [r for r in rows if r["status"] != "candidate"]
+    ok = [r for r in decided if r["status"] == "approved"]
+    no = [r for r in decided if r["status"] == "rejected"]
+
+    print(f"\n  {len(rows)} candidates, {len(decided)} decided, "
+          f"{len(rows) - len(decided)} left")
+    if not decided:
+        print("  nothing decided yet — `orbitcut review`")
+        return 0
+    print(f"  {len(ok)} approved, {len(no)} rejected "
+          f"({len(ok) / len(decided):.0%} approval rate)")
+
+    reasons = {}
+    for r in no:
+        reasons[r["reason"] or "(no reason)"] = reasons.get(r["reason"] or "(no reason)", 0) + 1
+    if reasons:
+        print("\n  why you rejected things")
+        for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]):
+            print(f"    {v:>4}  {k}")
+
+    by_type = {}
+    for r in decided:
+        d = r["dominant"] or "unknown"
+        a, t = by_type.get(d, (0, 0))
+        by_type[d] = (a + (r["status"] == "approved"), t + 1)
+    if by_type:
+        print("\n  approval rate by what carried the clip")
+        for k, (a, t) in sorted(by_type.items(), key=lambda kv: -kv[1][1]):
+            print(f"    {k:<8}{a:>4}/{t:<4}{a / t:>6.0%}")
+
+    # The in/out adjustments are the part a bare approve/reject cannot give.
+    # A consistent shift in one direction is a constant in select.py being wrong.
+    # Was the length cap binding? A clip sitting exactly at CLIP_MAX_S wanted
+    # to be longer and could not be, and the honest fix for "clips run short" is
+    # raising that cap rather than lengthening every clip by the mean adjustment
+    # — the clips you adjusted are a self-selected sample of the broken ones.
+    from . import select as _sel
+    at_cap = [r for r in decided
+              if abs((r["t_out"] - r["t_in"]) - _sel.CLIP_MAX_S) < 0.05]
+    if at_cap:
+        ok_at_cap = sum(1 for r in at_cap if r["status"] == "approved")
+        moved = sum(1 for r in at_cap if r["t_out_user"] is not None)
+        print(f"\n  clip length")
+        print(f"    {len(at_cap)}/{len(decided)} clips sit exactly at the "
+              f"{_sel.CLIP_MAX_S:.0f}s cap ({ok_at_cap} of them approved)")
+        print(f"    {moved} of those had their out-point moved")
+        if moved >= 3 or len(at_cap) > len(decided) * 0.15:
+            print(f"    -> the cap is binding. Raise CLIP_MAX_S rather than")
+            print(f"       lengthening every clip.")
+
+    ins = [r["t_in_user"] - r["t_in"] for r in decided if r["t_in_user"] is not None]
+    outs = [r["t_out_user"] - r["t_out"] for r in decided if r["t_out_user"] is not None]
+    if ins or outs:
+        print("\n  where you moved the boundaries")
+        from . import select as sel_mod
+        if ins:
+            m = float(np.mean(ins))
+            print(f"    in-point : {len(ins)} adjusted, mean {m:+.2f}s")
+            if len(ins) >= 8 and abs(m) > 0.4:
+                want = sel_mod.LEAD_S - m
+                print(f"      -> you pull the in-point {'earlier' if m < 0 else 'later'} "
+                      f"consistently. LEAD_S is {sel_mod.LEAD_S:.1f}s; "
+                      f"{want:.1f}s matches what you actually do.")
+        if outs:
+            m = float(np.mean(outs))
+            print(f"    out-point: {len(outs)} adjusted, mean {m:+.2f}s")
+            if len(outs) >= 8 and abs(m) > 0.4:
+                print(f"      -> clips run {'long' if m < 0 else 'short'} by about "
+                      f"{abs(m):.1f}s on average.")
+
+    print("\n  what this is enough for")
+    n, rate = len(decided), (len(ok) / len(decided)) if decided else 0
+    minority = min(len(ok), len(no))
+    print(f"    {'yes' if n >= 25 else 'not yet':<8} judging whether selection picks "
+          f"sensible clips (about 25)")
+    print(f"    {'yes' if len(ins) + len(outs) >= 8 else 'not yet':<8} tuning the "
+          f"lead-in and clip length (about 8 adjustments)")
+    need = 4 * 10
+    print(f"    {'yes' if minority >= need else 'not yet':<8} fitting weights on your "
+          f"taste ({need} of the rarer class; you have {minority})")
+    if minority < need and n:
+        remaining = (need - minority) / max(min(rate, 1 - rate), 0.05)
+        print(f"             at your current {rate:.0%} approval rate that is "
+              f"roughly {remaining:.0f} more decisions")
+    return 0
+
+
+def cmd_fit(args) -> int:
+    """Fit weights on the decision log and say whether to trust them."""
+    from . import fit as fit_mod
+
+    conn = db.connect()
+
+    # Group rates first, deliberately. The per-clip model cannot see ride-level
+    # structure, and on this log the ride mattered far more than any feature —
+    # so leading with the model would bury the finding under a null result.
+    groups = fit_mod.group_rates(conn)
+    if groups:
+        gps = [g for g in groups if g["gps"]]
+        no = [g for g in groups if not g["gps"]]
+        print("\n  approval rate by ride")
+        for g in groups[:12]:
+            bar = "#" * int(round(20 * g["ok"] / max(g["n"], 1)))
+            print(f"    {str(g['ride'] or '?'):<8}{g['ok']:>3}/{g['n']:<4}"
+                  f"{g['ok'] / max(g['n'], 1):>6.0%}  {'gps' if g['gps'] else '   '}"
+                  f"  {g['lighting'] or '':<9}{bar}")
+        if len(groups) > 12:
+            print(f"    ... {len(groups) - 12} more")
+        if gps and no:
+            a1, n1 = sum(g["ok"] for g in no), sum(g["n"] for g in no)
+            a2, n2 = sum(g["ok"] for g in gps), sum(g["n"] for g in gps)
+            if n1 and n2:
+                print(f"\n    rides without GPS  {a1:>3}/{n1:<4}{a1 / n1:>6.0%}")
+                print(f"    rides with GPS     {a2:>3}/{n2:<4}{a2 / n2:>6.0%}")
+
+    attrs = fit_mod.attribute_rates(conn)
+    if attrs:
+        print("\n  approval rate by ride attribute")
+        print(f"    {'attribute':<16}{'value':<14}{'approved':>10}{'rate':>7}{'rides':>7}")
+        print("    " + "-" * 56)
+        for label, vals in attrs.items():
+            for i, v in enumerate(vals):
+                name = label if i == 0 else ""
+                key = str(v["k"]) if v["k"] is not None else "(unset)"
+                print(f"    {name:<16}{key[:13]:<14}"
+                      f"{f'{v[chr(111)+chr(107)]}/{v[chr(110)]}':>10}"
+                      f"{v['ok'] / v['n']:>7.0%}{v['rides']:>7}")
+            print()
+        print("    A split that separates on `rides` alone is the ride effect")
+        print("    wearing a different label. One that holds across many rides in")
+        print("    each bucket is a property of the footage.")
+        same = fit_mod.confounded_groups(conn)
+        for grp in same:
+            print(f"\n    SAME SPLIT: {', '.join(grp)}")
+            print("      These cut your library in exactly the same place, so they")
+            print("      are one variable with several names. Nothing in this log")
+            print("      can tell them apart — that needs footage shot the other")
+            print("      way round, not a better model.")
+
+    for feats, label in ((fit_mod.COMMON, "turn + rough + jump (every ride)"),
+                         (fit_mod.FEATURES, "all four (GPS rides only)")):
+        r = fit_mod.evaluate(conn, seed=args.seed, feats=feats)
+        print(f"\n  === {label} ===")
+        if "error" in r:
+            print(f"    {r['error']}")
+            continue
+        if r["dropped"]:
+            print(f"    dropped {r['dropped']} decisions "
+                  f"({r['dropped_approved']} of them approved) for missing features")
+        print(f"    fitted on {r['n']} ({r['n_pos']} approved, {r['n_neg']} rejected)")
+        print(f"    {'feature':<9}{'coef':>8}{'+/-':>7}   stable")
+        for f, c_, sd_, st in zip(r["features"], r["coef_mean"], r["coef_sd"],
+                                  r["coef_sign_stable"]):
+            print(f"    {f:<9}{c_:>8.2f}{sd_:>7.2f}   {'yes' if st else 'NO'}")
+        print(f"    held-out AUC  pooled {r['cv_auc_fit']:.3f}   "
+              f"current weights {r['cv_auc_incumbent']:.3f}")
+        print(f"    within-ride   {r['cv_auc_within']:.3f} "
+              f"on {r['within_pairs']} same-ride pairs   "
+              f"(current weights {r['incumbent_within']:.3f})")
+        print(f"    verdict: {r['verdict'].upper()} — {r['why']}")
+        if r["verdict"] == "use it":
+            # Emit the COMPLETE weight vector. `_weights` only overrides the keys
+            # it is given, so a partial suggestion silently leaves the others at
+            # their old values — the first version of this proposed dropping turn
+            # while quietly leaving speed at 0.50, which is not what was fitted.
+            comp = ("speed", "turn", "rough")
+            sug = {k: r["suggested"].get(k, 0.0) for k in comp}
+            missing = [k for k in comp if k not in r["features"]]
+            tot = sum(sug.values())
+            if tot > 0:
+                sug = {k: v / tot for k, v in sug.items()}
+            w = ",".join(f"{k}={v:.2f}" for k, v in sug.items())
+            print(f"\n    suggested:  orbitcut calibrate --weights {w}")
+            if missing:
+                print(f"    {', '.join(missing)} was not in this model, so this "
+                      f"proposes dropping it entirely.")
+                print(f"    That is a real claim and the fit does not support it "
+                      f"on its own — check the other model before accepting.")
+            extra = r["suggested"].get("jump", 0.0)
+            if extra > 0.05:
+                print(f"    ({extra:.0%} of the fit went to jump, which is not a "
+                      f"composite weight — see AIR_GAIN)")
+
+    print("\n  Note the candidates were already gated at MIN_SCORE — every clip")
+    print("  here scored above the median second in your library. A model asked")
+    print("  which of several good clips you prefer has far less to work with")
+    print("  than the AUC scale suggests.")
+    return 0
+
+
+def cmd_level(args) -> int:
+    """What the horizon is doing on a ride, and what each levelling mode costs.
+
+    Measurement before application, for the same reason phase 0 measured roll
+    suppression before any of this was written: correcting footage the camera
+    already corrected looks worse than leaving it alone. This prints the numbers
+    so the mode is a choice with a price attached rather than a default.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from . import level as lv, render as rn
+
+    conn = db.connect()
+    rows = [a for a in db.assets(conn)
+            if args.asset in (a["ride_id"] or "")
+            or args.asset in (a["filename"] or "")]
+    if not rows:
+        print(f"no asset matching {args.asset!r}")
+        return 1
+
+    print(f"  {'file':<22}{'constant':>10}{'swing':>9}{'worst':>8}   verdict")
+    checked = []
+    for a in rows:
+        tp = a["telemetry_path"]
+        if not tp or not Path(tp).exists():
+            print(f"  {a['filename']:<22}{'—':>10}{'—':>9}{'—':>8}   no telemetry")
+            continue
+        t, roll = lv.roll_series(pd.read_parquet(tp))
+        s = lv.summarise(t, roll)
+        if not s["usable"]:
+            print(f"  {a['filename']:<22}{'—':>10}{'—':>9}{'—':>8}   "
+                  "no GRAV, or too little roll to find the image plane")
+            continue
+        verdict = ("constant worth applying" if s["worth_constant"]
+                   else f"mount is square (<{lv.MIN_CONSTANT_DEG}°)")
+        print(f"  {a['filename']:<22}{s['constant_deg']:>9.1f}°"
+              f"{s['spread_deg']:>8.1f}°{s['max_deg']:>7.1f}°   {verdict}")
+        checked.append((a, t, roll))
+
+    # The sign is the one thing telemetry cannot settle, and getting it wrong
+    # doubles the tilt rather than failing, so it is read off the pixels.
+    print("\n  which way is positive, checked against the frames:")
+    for a, t, roll in checked[:4]:
+        src = a["source_path"]
+        if not src or not Path(src).exists():
+            print(f"  {a['filename']:<22}original not here — render would skip levelling")
+            continue
+        v = lv.verify_sign(src, t, roll)
+        if v.get("usable"):
+            print(f"  {a['filename']:<22}sign {v['sign']:+d}, correlation "
+                  f"{v['corr']:+.2f} over {v['frames']} frames")
+        else:
+            print(f"  {a['filename']:<22}inconclusive — {v.get('reason', '')}; "
+                  "render would leave this one alone")
+
+    # The crop cost is a property of the source shape, not of the ride, so it is
+    # printed once. It is the whole argument against dynamic on 16:9.
+    print("\n  what a rotation costs, by source shape:")
+    print(f"  {'shape':<14}{'crop':>12}{'max angle':>11}{'width at 5°':>13}")
+    for name, (w, h) in (("8:7 4K", (3956, 3460)), ("8:7 5.3K", (5312, 4648)),
+                         ("16:9 4K", (3840, 2160)), ("16:9 5.3K", (5312, 2988))):
+        cw, ch, _x, _y = rn.crop_box(w, h)
+        budget = rn.rotation_budget(cw, ch, w, h)
+        at5 = int(cw * rn.safe_scale(cw, ch, w, h, 5.0))
+        print(f"  {name:<14}{f'{cw}x{ch}':>12}{budget:>10.1f}°{at5:>13}")
+    print(f"\n  Angles are clamped so the crop never drops under {rn.TARGET_W} wide;")
+    print("  levelling further would mean upscaling, which is worse than a tilt.")
+    print("  Dynamic also removes the lean itself — on a bike the lean is the")
+    print("  riding, so watch one clip both ways before committing to it.")
+    return 0
+
+
+def cmd_render(args) -> int:
+    """Render approved clips as 9:16 Reels, standalone and per-ride."""
+    from . import render as rn
+
+    conn = db.connect()
+    assets = {a["content_hash"]: a for a in db.assets(conn)}
+    segs = [s for s in db.segments(conn, status="approved")]
+    if args.asset:
+        segs = [s for s in segs
+                if args.asset in (assets.get(s["content_hash"], {})["ride_id"] or "")
+                or args.asset in (assets.get(s["content_hash"], {})["filename"] or "")]
+    if not segs:
+        print("nothing approved to render — run `orbitcut review` first")
+        return 1
+
+    # Group by ride, in time order. A compilation should play the ride as it
+    # happened, not best-first: the ordering IS the edit.
+    rides: dict[str, list] = {}
+    for s in segs:
+        a = assets.get(s["content_hash"])
+        if not a or not a["source_path"] or not Path(a["source_path"]).exists():
+            print(f"  ! original missing for {a['filename'] if a else s['content_hash']}"
+                  f" — skipped (rendering needs the original, not the proxy)")
+            continue
+        rides.setdefault(a["ride_id"] or s["content_hash"][:8], []).append((s, a))
+    for v in rides.values():
+        v.sort(key=lambda sa: ((sa[1]["chapter"] or 0), sa[0]["t_in"]))
+
+    out_root = config.RENDERS
+    out_root.mkdir(parents=True, exist_ok=True)
+    made, failed = [], 0
+    for ride, items in sorted(rides.items()):
+        d = out_root / ride
+        d.mkdir(exist_ok=True)
+        parts = []
+        print(f"\n  {ride} — {len(items)} approved clip(s)")
+        for n, (s, a) in enumerate(items, 1):
+            t_in = s["t_in_user"] if s["t_in_user"] is not None else s["t_in"]
+            t_out = s["t_out_user"] if s["t_out_user"] is not None else s["t_out"]
+            out = d / f"{ride}_{n:02d}_{s['dominant'] or 'clip'}.mp4"
+            try:
+                rn.clip(a["source_path"], t_in, t_out, out,
+                        level=None if args.level == "none" else args.level,
+                        telemetry=a["telemetry_path"])
+                parts.append({"path": out, "t_in": t_in, "t_out": t_out})
+                print(f"    {out.name}  {t_out - t_in:.1f}s")
+                made.append(out)
+            except Exception as exc:
+                failed += 1
+                print(f"    ! {out.name}: {exc}")
+        if len(parts) > 1 and not args.no_compile:
+            for i, group in enumerate(rn.split_by_budget(parts), 1):
+                suffix = "" if i == 1 else f"_part{i}"
+                reel = d / f"{ride}_reel{suffix}.mp4"
+                try:
+                    rn.compile_reel([g["path"] for g in group], reel)
+                    tot = sum(g["t_out"] - g["t_in"] for g in group)
+                    print(f"    {reel.name}  {len(group)} clips, "
+                          f"{tot / 60:.1f} min")
+                    made.append(reel)
+                except Exception as exc:
+                    failed += 1
+                    print(f"    ! {reel.name}: {exc}")
+
+    print(f"\n  {len(made)} file(s) in {out_root}"
+          + (f", {failed} failure(s)" if failed else ""))
+    print(f"  1080x1920, H.264/AAC, faststart — Instagram's recommended shape."
+          + (f"\n  Horizon: {args.level}." if args.level != "none" else ""))
+    print("  Compilations are capped under three minutes and split into parts")
+    print("  rather than truncated, so no clip is ever cut off mid-action.")
+    return 1 if failed else 0
+
+
 # ----------------------------------------------------------------------- rank
 def cmd_rank(args) -> int:
     """Rank rides against each other, so cross-ride calibration can be checked.
@@ -941,6 +1410,44 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
     p.add_argument("--sharpness", type=float, help="peak emphasis; see calibrate")
     p.set_defaults(fn=cmd_overlay)
+
+    p = sub.add_parser("clips", help="pick candidate clips from scored rides")
+    p.add_argument("asset", nargs="?", help="hash prefix, filename or ride number")
+    p.add_argument("--top", type=int, default=6, help="cap per file (default 6)")
+    p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
+    p.add_argument("--sharpness", type=float, help="peak emphasis; see calibrate")
+    p.set_defaults(fn=cmd_clips)
+
+    p = sub.add_parser("reel", help="render a ride's candidates back to back")
+    p.add_argument("asset", help="hash prefix, filename or ride number")
+    p.set_defaults(fn=cmd_reel)
+
+    p = sub.add_parser("review", help="approve or reject candidates in a browser")
+    p.add_argument("asset", nargs="?", help="limit to one ride")
+    p.add_argument("--port", type=int, default=0, help="default: pick a free one")
+    p.add_argument("--no-open", action="store_true", help="do not open a browser")
+    p.set_defaults(fn=cmd_review)
+
+    sub.add_parser("log", help="what the decision log holds").set_defaults(fn=cmd_log)
+
+    p = sub.add_parser("fit", help="fit weights on your approve/reject decisions")
+    p.add_argument("--seed", type=int, default=0, help="fold shuffle seed")
+    p.set_defaults(fn=cmd_fit)
+
+    p = sub.add_parser("render", help="approved clips out as 9:16 Reels")
+    p.add_argument("asset", nargs="?", help="limit to one ride")
+    p.add_argument("--no-compile", action="store_true",
+                   help="standalone clips only, no per-ride compilation")
+    p.add_argument("--level", choices=("none", "constant", "dynamic"),
+                   default="constant",
+                   help="horizon: leave it, remove the mount offset (default), "
+                        "or lock the horizon per frame; see `orbitcut level`")
+    p.set_defaults(fn=cmd_render)
+
+    p = sub.add_parser("level", help="what the horizon is doing, and what "
+                                     "levelling would cost")
+    p.add_argument("asset", help="ride id or filename")
+    p.set_defaults(fn=cmd_level)
 
     p = sub.add_parser("rank", help="rank rides against each other")
     p.add_argument("--top", type=int, help="only the best N")
