@@ -998,8 +998,27 @@ def cmd_retime(args) -> int:
                 # never locked looks identical to one with no GPS stream at
                 # all, and the difference matters: the first has a GPS stream
                 # full of placeholders that other stages have to know to refuse.
+                #
+                # And re-derive the lighting, because leaving it alone was
+                # wrong. A label computed from solar elevation is only as good
+                # as the timestamp under it; when that timestamp is one we now
+                # distrust and cannot replace, the label has to go rather than
+                # survive on the strength of being already written. GX010678
+                # kept "night" at a sun elevation of -43.7 degrees this way.
+                note = ""
+                if tp and Path(tp).exists():
+                    label = (tel_mod.lighting_from_exposure(pd.read_parquet(tp))
+                             or "unknown")
+                    if label != a["lighting"]:
+                        note = f"{a['lighting']} -> {label}"
+                        relit += 1
+                        if not args.dry_run:
+                            db.upsert_asset(conn, a["content_hash"],
+                                            lighting=label,
+                                            lighting_source="exposure",
+                                            sun_elevation=None)
                 print(f"  {a['filename']:<20}{(a['recorded_at'] or '')[:16]:>18}"
-                      f"{'no locked GPS':>18}")
+                      f"{'no locked GPS':>18}{'':>9}  {note}")
                 continue
             drift = tel_mod.clock_drift_s(a["recorded_at"], gps_time)
             fields = {"recorded_at_gps": gps_time, "clock_drift_s": drift}

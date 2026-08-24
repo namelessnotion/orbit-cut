@@ -449,11 +449,19 @@ def lighting_from_exposure(df: pd.DataFrame) -> str | None:
         return None
     if iso < 400:
         return "day"
-    if iso > 1600:
-        return "night"
-    # 400-1600 is genuinely ambiguous: dense canopy at midday and open sky at
-    # dusk land in the same band. Solar elevation separates them and needs GPS.
-    return "twilight"
+    # Everything above that is ambiguous and this function used to guess anyway:
+    # "twilight" from 400-1600 and "night" above it. Against ground truth — a
+    # library shot entirely in daylight — it produced 12 nights and 27
+    # twilights out of 76 files. Dense canopy at midday and open sky at dusk
+    # land in the same band, which the architecture doc already said, and a
+    # threshold cannot be placed responsibly without a single night ride to
+    # calibrate against.
+    #
+    # So it reports what it can establish and no more. Bright is a measurement;
+    # dark is a question. When there is real night footage, come back with data
+    # and split this properly — solar elevation from a locked GPS is the answer
+    # in the meantime, and the camera now records GPS.
+    return "unknown"
 
 
 def sun_elevation(lat: float, lon: float, when: str) -> float | None:
