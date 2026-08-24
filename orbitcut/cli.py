@@ -1061,7 +1061,9 @@ def cmd_retime(args) -> int:
                 # survive on the strength of being already written. GX010678
                 # kept "night" at a sun elevation of -43.7 degrees this way.
                 note = ""
-                if tp and Path(tp).exists():
+                if a["lighting_source"] == "hand":
+                    note = "hand-set, left alone"
+                elif tp and Path(tp).exists():
                     label = (tel_mod.lighting_from_exposure(pd.read_parquet(tp))
                              or "unknown")
                     if label != a["lighting"]:
@@ -1081,7 +1083,14 @@ def cmd_retime(args) -> int:
             if drift is not None and abs(drift) > tel_mod.CLOCK_DRIFT_WARN_S:
                 fields["recorded_at"] = gps_time
                 drifted += 1
-            if a["gps_lat"] is not None:
+            if a["lighting_source"] == "hand":
+                # Set from the review UI, while looking at the footage. A solar
+                # calculation is a better guess than an exposure heuristic, and
+                # a person who watched the clip beats both — so this is the one
+                # label retime does not touch.
+                note = "hand-set, left alone"
+                elev = None
+            elif a["gps_lat"] is not None:
                 elev = tel_mod.sun_elevation(a["gps_lat"], a["gps_lon"], gps_time)
                 label = tel_mod.lighting_label(elev)
                 if label != a["lighting"]:

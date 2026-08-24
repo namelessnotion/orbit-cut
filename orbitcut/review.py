@@ -50,6 +50,8 @@ def _rows(conn, ride: str | None) -> list[dict]:
             "id": s["id"], "hash": s["content_hash"],
             "ride": a["ride_id"] or a["content_hash"][:8],
             "file": a["filename"], "lighting": a["lighting"] or "-",
+            "lighting_source": a["lighting_source"] or "",
+            "mount": a["mount"] or "-", "style": a["style"] or "-",
             "t_in": s["t_in"], "t_out": s["t_out"],
             "t_in_user": s["t_in_user"], "t_out_user": s["t_out_user"],
             "rank": s["rank"], "score": s["score"], "dominant": s["dominant"],
@@ -79,6 +81,16 @@ video{flex:1;min-height:0;background:#000;width:100%;object-fit:contain}
 kbd{background:#2a2926;border-radius:3px;padding:1px 5px;color:var(--paper)}
 #help{color:var(--muted);font-size:12px}
 #count{margin-left:auto;color:var(--muted)}
+#ride{padding:8px 16px;border-top:1px solid #2a2926;display:flex;gap:14px;
+      align-items:center;flex-wrap:wrap;background:#151410}
+#ride .lbl{color:var(--muted);font-size:12px;text-transform:uppercase;
+           letter-spacing:.08em}
+#ridehelp{color:var(--muted);font-size:12px;margin-left:auto}
+.pick{border:1px solid #3a3935;border-radius:12px;padding:2px 9px;margin-right:4px;
+      color:var(--muted);font-size:12px;cursor:pointer}
+.pick:hover{border-color:var(--accent);color:var(--paper)}
+.pick.sel{background:var(--accent);border-color:var(--accent);color:#11100E}
+.guess{color:var(--muted);font-size:11px;font-style:italic}
 .chip{border:1px solid #3a3935;border-radius:12px;padding:2px 9px;margin-right:5px;
       color:var(--muted);font-size:12px;cursor:pointer}
 .chip:hover{border-color:var(--accent);color:var(--paper)}
@@ -95,6 +107,14 @@ kbd{background:#2a2926;border-radius:3px;padding:1px 5px;color:var(--paper)}
       &nbsp;<kbd>x</kbd> reject &nbsp;<kbd>u</kbd> undo
       &nbsp;<kbd>[</kbd><kbd>]</kbd> in &nbsp;<kbd>-</kbd><kbd>=</kbd> out
       &nbsp;<kbd>r</kbd> replay</div>
+  </div>
+  <div id=ride>
+    <span class=lbl>this ride</span>
+    <span id=light></span>
+    <span id=mount></span>
+    <span id=ridehelp><kbd>d</kbd> day <kbd>t</kbd> twilight <kbd>n</kbd> night
+      &nbsp;·&nbsp; <kbd>c</kbd> chest <kbd>h</kbd> helmet
+      &nbsp;·&nbsp; applies to every chapter of the ride</span>
   </div>
 </div>
 <script>
@@ -119,7 +139,36 @@ function draw(){
     `<span class=chip onclick="decide('rejected','${x}')">${n+1} ${x}</span>`).join('');
   const done = DATA.filter(d=>d.status!=='candidate').length;
   document.getElementById('count').textContent = `${done}/${DATA.length} decided`;
+  drawRide(r);
   document.querySelector('.row.on')?.scrollIntoView({block:'nearest'});
+}
+function drawRide(r){
+  // Whether the current value was measured, guessed or set by hand is worth
+  // showing: `exposure` cannot tell canopy shade from dusk, which is how this
+  // library ended up with 39 wrong labels, and knowing that is what makes it
+  // obvious a label is worth correcting.
+  const src = r.lighting_source ? ` <span class=guess>(${r.lighting_source})</span>` : '';
+  document.getElementById('light').innerHTML =
+    ['day','twilight','night'].map(x =>
+      `<span class="pick ${r.lighting===x?'sel':''}" onclick="setAsset({lighting:'${x}'})"
+        >${x}</span>`).join('') + src;
+  document.getElementById('mount').innerHTML =
+    ['chest','helmet'].map(x =>
+      `<span class="pick ${r.mount===x?'sel':''}" onclick="setAsset({mount:'${x}'})"
+        >${x}</span>`).join('');
+}
+async function setAsset(fields){
+  const r = DATA[i]; if(!r) return;
+  const res = await fetch('/api/asset', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(Object.assign({hash:r.hash}, fields))});
+  const got = await res.json();
+  if(got.error) return;
+  // Mount and time of day belong to the ride, so every chapter of it moves
+  // together — update each row on screen rather than only the selected one.
+  for(const row of DATA) if(row.ride === r.ride) Object.assign(row, fields,
+      fields.lighting ? {lighting_source:'hand'} : {});
+  draw();
 }
 function play(){
   const r = DATA[i]; if(!r) return;
@@ -169,6 +218,11 @@ addEventListener('keydown', e=>{
   else if(k===']') nudge('t_in_user',  0.5);
   else if(k==='-') nudge('t_out_user', -0.5);
   else if(k==='=') nudge('t_out_user',  0.5);
+  else if(k==='d') setAsset({lighting:'day'});
+  else if(k==='t') setAsset({lighting:'twilight'});
+  else if(k==='n') setAsset({lighting:'night'});
+  else if(k==='c') setAsset({mount:'chest'});
+  else if(k==='h') setAsset({mount:'helmet'});
   else if(/^[1-5]$/.test(k)) decide('rejected', REASONS[+k-1]);
   else return;
   e.preventDefault();
@@ -201,6 +255,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def do_POST(self):
+        if self.path == "/api/asset":
+            return self._set_asset()
         if self.path != "/api/decide":
             return self._send(404, "text/plain", b"not found")
         n = int(self.headers.get("Content-Length") or 0)
@@ -223,6 +279,54 @@ class Handler(BaseHTTPRequestHandler):
         for r in self.rows:
             if r["id"] == req["id"]:
                 r.update(out)
+        self._send(200, "application/json", json.dumps(out).encode())
+
+    def _set_asset(self):
+        """Record time of day or mount for the ride the current clip is from.
+
+        These are properties of the *ride*, not the clip, so the write goes to
+        the asset and covers every chapter of it — a mount does not change
+        between GX01 and GX02 of the same recording, and neither does the light.
+
+        `lighting_source` becomes "hand", which matters: `retime` recomputes
+        lighting from solar elevation and would otherwise overwrite a judgement
+        made while actually looking at the footage. A measurement beats a guess,
+        but a person who watched it beats both.
+        """
+        n = int(self.headers.get("Content-Length") or 0)
+        req = json.loads(self.rfile.read(n) or b"{}")
+        fields = {}
+        if req.get("lighting") in ("day", "twilight", "night"):
+            fields["lighting"] = req["lighting"]
+            fields["lighting_source"] = "hand"
+        if req.get("mount") in ("chest", "helmet"):
+            fields["mount"] = req["mount"]
+        if not fields or not req.get("hash"):
+            return self._send(400, "application/json", b'{"error":"nothing to set"}')
+
+        conn = db.connect()
+        row = conn.execute("SELECT ride_id FROM asset WHERE content_hash = ?",
+                           (req["hash"],)).fetchone()
+        ride = row["ride_id"] if row else None
+        if ride:
+            hashes = [r["content_hash"] for r in conn.execute(
+                "SELECT content_hash FROM asset WHERE ride_id = ?", (ride,))]
+        else:
+            hashes = [req["hash"]]
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        for h in hashes:
+            conn.execute(f"UPDATE asset SET {sets} WHERE content_hash = ?",
+                         [*fields.values(), h])
+        conn.commit()
+        conn.close()
+
+        # Every row on screen from those chapters shows the new value at once,
+        # rather than only the one that happened to be selected.
+        touched = set(hashes)
+        for r in self.rows:
+            if r["hash"] in touched:
+                r.update({k: v for k, v in fields.items()})
+        out = dict(fields, chapters=len(hashes), ride=ride)
         self._send(200, "application/json", json.dumps(out).encode())
 
     def _send(self, code: int, ctype: str, body: bytes):
