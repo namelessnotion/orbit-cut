@@ -68,6 +68,15 @@ which way the camera is screwed to the strap, so it is read straight off the
 frames. Across those three rides it is +0.3, -0.9 and -0.4 degrees: **the mount
 is square**, constant levelling has nothing to do, and what is left for dynamic
 is between 3 and 11 degrees of visible swing.
+
+Because the constant needs no telemetry, it stays available when the dynamic fit
+is refused — which is not a rare corner. Ride 0603 rolls 34 degrees at the body
+and its picture will not line up with that at any lag (best |corr| 0.26 over a
++/-60 s scan, and the sign flips between quarters of the ride). Whether the
+camera removed the roll or the scenery's own lean is drowning it cannot be told
+apart from here — leaning trees scatter the frames by about as much as a
+passed-through roll does — so the refusal says only what is certain: the picture
+does not follow the body, and dynamic levelling has nothing to act on.
 """
 from __future__ import annotations
 
@@ -253,11 +262,27 @@ def calibrate(video: str, tel: pd.DataFrame, n_frames: int = 60,
     # depends on how the camera sits on the strap, which gravity cannot know.
     best["constant_deg"] = float(np.average(y, weights=w))
     best["frames"] = int(len(y))
+    best["seen_spread_deg"] = float(np.percentile(y, 95) - np.percentile(y, 5))
     best["worth_constant"] = abs(best["constant_deg"]) >= MIN_CONSTANT_DEG
+    # Constant levelling needs none of the telemetry — only the tilt the frames
+    # show — so it stays available even when the dynamic fit is refused.
+    best["constant_usable"] = True
     lo_g, hi_g = GAIN_RANGE
     if abs(best["corr"]) < MIN_CORR:
         best["usable"] = False
-        best["reason"] = f"frames and telemetry agree only {best['corr']:+.2f}"
+        # Say the consequence, not the cause. A weak correlation could mean the
+        # camera removed the roll before it reached the frame, or that the
+        # scenery's own tilt is drowning it — leaning trees and trail camber
+        # scatter the frames by about as much as a passed-through roll does, so
+        # the two are not separable from here. Either way the picture does not
+        # follow the body, which is the only thing dynamic levelling could act
+        # on. An earlier draft of this branched on the visible spread and
+        # announced "already level in camera"; the ride that prompted it shows
+        # 10.0 degrees of visible tilt against a ride that genuinely passes roll
+        # through at 10.8, so that threshold was separating nothing.
+        best["reason"] = (f"the picture does not follow the body roll "
+                          f"(corr {best['corr']:+.2f}) — nothing for dynamic "
+                          f"to remove")
     elif not lo_g <= abs(best["gain"]) <= hi_g:
         best["usable"] = False
         best["reason"] = f"gain {best['gain']:+.2f} is outside {lo_g}–{hi_g}"

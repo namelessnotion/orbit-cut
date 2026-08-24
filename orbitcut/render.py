@@ -130,6 +130,7 @@ def rotation_budget(cw: int, ch: int, width: int, height: int) -> float:
 
 
 _ROLL: dict[str, tuple] = {}
+_CAL: dict[str, dict] = {}
 
 
 def roll_for(src: str, telemetry: str | None, preview: str | None = None) -> tuple:
@@ -146,27 +147,44 @@ def roll_for(src: str, telemetry: str | None, preview: str | None = None) -> tup
     the wrong way doubles the tilt instead of removing it, and that failure is
     silent, so it is declined here rather than guessed at.
     """
-    if src in _ROLL:
-        return _ROLL[src]
+    cal = calibration_for(src, telemetry, preview)
+    if not cal.get("usable"):
+        return np.array([]), np.array([])
+    import pandas as pd
+
+    from . import level as lv
+    return lv.visible_roll(pd.read_parquet(telemetry), cal)
+
+
+def calibration_for(src: str, telemetry: str | None,
+                    preview: str | None = None) -> dict:
+    """The per-ride horizon fit, measured once and remembered.
+
+    Two results come out of it and they have different requirements. The
+    *constant* tilt is read from the frames alone, so it survives even when the
+    telemetry cannot be matched to them — which is most of this library, because
+    the camera removes nearly all the roll before it lands in a frame. The
+    *dynamic* series needs the fit to hold, and is refused when it does not,
+    since levelling the wrong way doubles the tilt rather than failing.
+    """
+    if src in _CAL:
+        return _CAL[src]
     import pandas as pd
 
     from . import level as lv
 
-    empty = (np.array([]), np.array([]))
-    _ROLL[src] = empty
+    _CAL[src] = {"usable": False, "reason": "no telemetry"}
     if not telemetry or not Path(telemetry).exists():
-        return empty
+        return _CAL[src]
     video = preview if preview and Path(preview).exists() else src
-    tel = pd.read_parquet(telemetry)
-    cal = lv.calibrate(video, tel)
-    if not cal.get("usable"):
-        print(f"    ! horizon not calibrated ({cal.get('reason', '')}) — "
-              f"rendering unlevelled")
-        return empty
-    print(f"    horizon: axis {cal['axis']}, {cal['gain']:+.2f} of body roll "
-          f"reaches the frame (corr {cal['corr']:+.2f}, {cal['frames']} frames)")
-    _ROLL[src] = lv.visible_roll(tel, cal)
-    return _ROLL[src]
+    cal = lv.calibrate(video, pd.read_parquet(telemetry))
+    _CAL[src] = cal
+    if cal.get("usable"):
+        print(f"    horizon: axis {cal['axis']}, {cal['gain']:+.2f} of body roll "
+              f"reaches the frame (corr {cal['corr']:+.2f}, {cal['frames']} frames)")
+    else:
+        print(f"    horizon: {cal.get('reason', 'not calibrated')}")
+    return cal
 
 
 def clip(src: str, t_in: float, t_out: float, out: Path,
@@ -174,9 +192,11 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
          telemetry: str | None = None, preview: str | None = None) -> Path:
     """One approved clip as a 1080x1920 Reel.
 
-    `level` is None, "constant" (one rotation for the clip) or "dynamic"
-    (per-frame). Both need telemetry; without it the clip renders unlevelled
-    rather than failing, because an unlevelled Reel is still a Reel.
+    `level` is None, "constant" (one rotation for the whole clip, removing how
+    the camera sits on the strap) or "dynamic" (per-frame, removing the lean as
+    well). Constant needs only the frames; dynamic also needs the telemetry to
+    match them, and renders unlevelled when it does not, because an unlevelled
+    Reel is still a Reel and a double-tilted one is not.
     """
     hwaccel = hwaccel or config.HWACCEL
     meta = probe(src)
@@ -186,27 +206,34 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     rot_graph, cmd_file, applied = "", None, 0.0
     if level:
         from . import level as lv
-        tt, roll = roll_for(src, telemetry, preview)
-        if len(roll):
-            span = (tt >= t_in) & (tt < t_out) & np.isfinite(roll)
+        budget = rotation_budget(cw, ch, meta["width"], meta["height"])
+        cal = calibration_for(src, telemetry, preview)
+
+        if level == "constant":
+            # Constant asks only what the frames show, so it does not need the
+            # telemetry fit to have held — and on this library it usually has
+            # not, because the camera takes the roll out before it reaches a
+            # frame. What it cannot take out is how the camera sits on the strap.
+            ang = float(np.clip(cal.get("constant_deg", 0.0), -budget, budget))
+            # Below the threshold the tilt is not visible but the crop cost is
+            # real, so a near-square mount pays nothing.
+            if abs(ang) < lv.MIN_CONSTANT_DEG or not cal.get("constant_usable"):
+                ang = 0.0
+            applied = abs(ang)
+            if applied:
+                rot_graph = f"rotate={-np.radians(ang):.6f}:ow=iw:oh=ih,"
+
+        else:
+            tt, roll = roll_for(src, telemetry, preview)
+            span = ((tt >= t_in) & (tt < t_out) & np.isfinite(roll)
+                    if len(roll) else np.zeros(0, dtype=bool))
             if span.sum() > 4:
-                budget = rotation_budget(cw, ch, meta["width"], meta["height"])
-                if level == "constant":
-                    ang = float(np.clip(np.median(roll[span]), -budget, budget))
-                    # Below the threshold the tilt is not visible but the crop
-                    # cost is real, so a near-square mount pays nothing.
-                    if abs(ang) < lv.MIN_CONSTANT_DEG:
-                        ang = 0.0
-                    applied = abs(ang)
-                    if applied:
-                        rot_graph = f"rotate={-np.radians(ang):.6f}:ow=iw:oh=ih,"
-                else:
-                    sm = np.clip(lv.smoothed(tt, roll), -budget, budget)
-                    applied = float(np.max(np.abs(sm[span])))
-                    cmd_file = out.with_suffix(".cmds")
-                    cmd_file.write_text(lv.sendcmd(tt, sm, t_in, t_out))
-                    rot_graph = (f"sendcmd=f='{cmd_file.as_posix()}',"
-                                 f"rotate=0:ow=iw:oh=ih,")
+                sm = np.clip(lv.smoothed(tt, roll), -budget, budget)
+                applied = float(np.max(np.abs(sm[span])))
+                cmd_file = out.with_suffix(".cmds")
+                cmd_file.write_text(lv.sendcmd(tt, sm, t_in, t_out))
+                rot_graph = (f"sendcmd=f='{cmd_file.as_posix()}',"
+                             f"rotate=0:ow=iw:oh=ih,")
 
     # Shrink the crop to whatever the applied rotation demands. Doing this after
     # the angle is known, rather than reserving a fixed margin, means an

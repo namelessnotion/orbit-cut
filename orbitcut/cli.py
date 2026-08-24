@@ -1135,8 +1135,8 @@ def cmd_level(args) -> int:
         print(f"no asset matching {args.asset!r}")
         return 1
 
-    print(f"  {'file':<22}{'axis':>6}{'gain':>7}{'corr':>7}{'body':>8}"
-          f"{'visible':>9}{'offset':>8}   verdict")
+    print(f"  {'file':<22}{'axis':>5}{'gain':>7}{'corr':>7}{'body':>8}"
+          f"{'seen':>8}{'offset':>8}   dynamic")
     for a in rows:
         tp, pv = a["telemetry_path"], a["proxy_path"]
         if not tp or not Path(tp).exists():
@@ -1146,26 +1146,28 @@ def cmd_level(args) -> int:
         if not video or not Path(video).exists():
             print(f"  {a['filename']:<22}no proxy and no original — nothing to read")
             continue
-        tel = pd.read_parquet(tp)
-        cal = lv.calibrate(video, tel)
-        if not cal.get("usable"):
+        cal = lv.calibrate(video, pd.read_parquet(tp))
+        if "constant_deg" not in cal:
             print(f"  {a['filename']:<22}{cal.get('reason', 'not calibrated')}")
             continue
-        _t, vis = lv.visible_roll(tel, cal)
-        s = lv.summarise(_t, vis)
+        # Print the measurement either way. A refused dynamic fit is still a
+        # finished measurement of the constant tilt, and saying only "declined"
+        # hides the number that decides whether constant is worth anything.
+        note = "yes" if cal["usable"] else cal["reason"]
+        print(f"  {a['filename']:<22}{cal['axis']:>5}{cal['gain']:>+7.2f}"
+              f"{cal['corr']:>+7.2f}{cal['swing_deg']:>7.1f}°"
+              f"{cal['seen_spread_deg']:>7.1f}°{cal['constant_deg']:>+7.1f}°   {note}")
         verdict = ("constant worth applying" if cal["worth_constant"]
-                   else f"mount is square (<{lv.MIN_CONSTANT_DEG}°)")
-        print(f"  {a['filename']:<22}{cal['axis']:>6}{cal['gain']:>+7.2f}"
-              f"{cal['corr']:>+7.2f}{cal['swing_deg']:>7.1f}°{s['spread_deg']:>8.1f}°"
-              f"{cal['constant_deg']:>+7.1f}°   {verdict}")
+                   else f"mount is square (<{lv.MIN_CONSTANT_DEG}°), constant is a no-op")
+        print(f"  {'':<22}{verdict}")
 
-    print("\n  `gain` is how much of the body's roll survives into the picture —")
-    print("  HyperSmooth removes the rest, and how much varies by ride, so it is")
-    print("  measured rather than assumed. `corr` is how well the frames and the")
-    print("  telemetry agree; under "
-          f"{lv.MIN_CORR} the ride renders unlevelled. `offset` is")
-    print("  the constant tilt read straight off the frames, which is what")
-    print("  constant levelling would remove.")
+    print("\n  `body` is how far the rider rolled; `seen` is how much of that")
+    print("  reaches the picture, and the gap between them is the camera's own")
+    print("  stabilisation. When the two stop correlating there is nothing left")
+    print("  for dynamic to remove — that is a result, not a failure.")
+    print("  `offset` is the constant tilt read straight off the frames, which")
+    print("  needs no telemetry at all, so `--level constant` still works on a")
+    print("  ride whose dynamic fit was refused.")
 
     # The crop cost is a property of the source shape, not of the ride, so it is
     # printed once. It is the whole argument against dynamic on 16:9.
