@@ -1123,7 +1123,6 @@ def cmd_level(args) -> int:
     already corrected looks worse than leaving it alone. This prints the numbers
     so the mode is a choice with a price attached rather than a default.
     """
-    import numpy as np
     import pandas as pd
 
     from . import level as lv, render as rn
@@ -1136,40 +1135,37 @@ def cmd_level(args) -> int:
         print(f"no asset matching {args.asset!r}")
         return 1
 
-    print(f"  {'file':<22}{'constant':>10}{'swing':>9}{'worst':>8}   verdict")
-    checked = []
+    print(f"  {'file':<22}{'axis':>6}{'gain':>7}{'corr':>7}{'body':>8}"
+          f"{'visible':>9}{'offset':>8}   verdict")
     for a in rows:
-        tp = a["telemetry_path"]
+        tp, pv = a["telemetry_path"], a["proxy_path"]
         if not tp or not Path(tp).exists():
-            print(f"  {a['filename']:<22}{'—':>10}{'—':>9}{'—':>8}   no telemetry")
+            print(f"  {a['filename']:<22}no telemetry")
             continue
-        t, roll = lv.roll_series(pd.read_parquet(tp))
-        s = lv.summarise(t, roll)
-        if not s["usable"]:
-            print(f"  {a['filename']:<22}{'—':>10}{'—':>9}{'—':>8}   "
-                  "no GRAV, or too little roll to find the image plane")
+        video = pv if pv and Path(pv).exists() else a["source_path"]
+        if not video or not Path(video).exists():
+            print(f"  {a['filename']:<22}no proxy and no original — nothing to read")
             continue
-        verdict = ("constant worth applying" if s["worth_constant"]
+        tel = pd.read_parquet(tp)
+        cal = lv.calibrate(video, tel)
+        if not cal.get("usable"):
+            print(f"  {a['filename']:<22}{cal.get('reason', 'not calibrated')}")
+            continue
+        _t, vis = lv.visible_roll(tel, cal)
+        s = lv.summarise(_t, vis)
+        verdict = ("constant worth applying" if cal["worth_constant"]
                    else f"mount is square (<{lv.MIN_CONSTANT_DEG}°)")
-        print(f"  {a['filename']:<22}{s['constant_deg']:>9.1f}°"
-              f"{s['spread_deg']:>8.1f}°{s['max_deg']:>7.1f}°   {verdict}")
-        checked.append((a, t, roll))
+        print(f"  {a['filename']:<22}{cal['axis']:>6}{cal['gain']:>+7.2f}"
+              f"{cal['corr']:>+7.2f}{cal['swing_deg']:>7.1f}°{s['spread_deg']:>8.1f}°"
+              f"{cal['constant_deg']:>+7.1f}°   {verdict}")
 
-    # The sign is the one thing telemetry cannot settle, and getting it wrong
-    # doubles the tilt rather than failing, so it is read off the pixels.
-    print("\n  which way is positive, checked against the frames:")
-    for a, t, roll in checked[:4]:
-        src = a["source_path"]
-        if not src or not Path(src).exists():
-            print(f"  {a['filename']:<22}original not here — render would skip levelling")
-            continue
-        v = lv.verify_sign(src, t, roll)
-        if v.get("usable"):
-            print(f"  {a['filename']:<22}sign {v['sign']:+d}, correlation "
-                  f"{v['corr']:+.2f} over {v['frames']} frames")
-        else:
-            print(f"  {a['filename']:<22}inconclusive — {v.get('reason', '')}; "
-                  "render would leave this one alone")
+    print("\n  `gain` is how much of the body's roll survives into the picture —")
+    print("  HyperSmooth removes the rest, and how much varies by ride, so it is")
+    print("  measured rather than assumed. `corr` is how well the frames and the")
+    print("  telemetry agree; under "
+          f"{lv.MIN_CORR} the ride renders unlevelled. `offset` is")
+    print("  the constant tilt read straight off the frames, which is what")
+    print("  constant levelling would remove.")
 
     # The crop cost is a property of the source shape, not of the ride, so it is
     # printed once. It is the whole argument against dynamic on 16:9.
@@ -1231,7 +1227,7 @@ def cmd_render(args) -> int:
             try:
                 rn.clip(a["source_path"], t_in, t_out, out,
                         level=None if args.level == "none" else args.level,
-                        telemetry=a["telemetry_path"])
+                        telemetry=a["telemetry_path"], preview=a["proxy_path"])
                 parts.append({"path": out, "t_in": t_in, "t_out": t_out})
                 print(f"    {out.name}  {t_out - t_in:.1f}s")
                 made.append(out)
@@ -1439,9 +1435,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-compile", action="store_true",
                    help="standalone clips only, no per-ride compilation")
     p.add_argument("--level", choices=("none", "constant", "dynamic"),
-                   default="constant",
-                   help="horizon: leave it, remove the mount offset (default), "
-                        "or lock the horizon per frame; see `orbitcut level`")
+                   default="none",
+                   help="horizon: leave it (default), remove the mount offset, "
+                        "or lock the horizon per frame; see `orbitcut level` — "
+                        "on this library the mount measures square, so constant "
+                        "has nothing to do and dynamic is a taste call")
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("level", help="what the horizon is doing, and what "

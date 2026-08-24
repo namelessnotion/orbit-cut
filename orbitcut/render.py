@@ -132,14 +132,19 @@ def rotation_budget(cw: int, ch: int, width: int, height: int) -> float:
 _ROLL: dict[str, tuple] = {}
 
 
-def roll_for(src: str, telemetry: str | None) -> tuple:
-    """(t, roll) for a source file, with the sign settled against its own pixels.
+def roll_for(src: str, telemetry: str | None, preview: str | None = None) -> tuple:
+    """(t, the tilt visible in the picture) for one source, calibrated per ride.
 
-    Cached per source: the sign check decodes a dozen frames, and every approved
-    clip from a ride would otherwise repeat it. Returns empty arrays when the
-    sign cannot be established — levelling the wrong way doubles the tilt
-    instead of removing it, and that failure is silent, so it is declined here
-    rather than guessed at.
+    Calibration runs against `preview` — the 540p proxy — because it decodes
+    dozens of frames and a rotation angle is the same at any scale. It settles
+    three things telemetry alone cannot: which axis is fore-aft, which way is
+    positive, and how much of the body's roll survives the camera's own
+    stabilisation, which measured 0.14, 0.42 and 0.12 across three rides.
+
+    Cached per source, since every approved clip from a ride would otherwise
+    repeat it. Returns empty arrays when the fit is not good enough — levelling
+    the wrong way doubles the tilt instead of removing it, and that failure is
+    silent, so it is declined here rather than guessed at.
     """
     if src in _ROLL:
         return _ROLL[src]
@@ -148,31 +153,25 @@ def roll_for(src: str, telemetry: str | None) -> tuple:
     from . import level as lv
 
     empty = (np.array([]), np.array([]))
+    _ROLL[src] = empty
     if not telemetry or not Path(telemetry).exists():
-        _ROLL[src] = empty
         return empty
-    t, roll = lv.roll_series(pd.read_parquet(telemetry))
-    if not len(roll):
-        print("    ! no usable GRAV arc — rendering unlevelled")
-        _ROLL[src] = empty
-        return empty
-    v = lv.verify_sign(src, t, roll)
-    if not v.get("usable"):
-        print(f"    ! roll sign unverified ({v.get('reason', '')}) — "
+    video = preview if preview and Path(preview).exists() else src
+    tel = pd.read_parquet(telemetry)
+    cal = lv.calibrate(video, tel)
+    if not cal.get("usable"):
+        print(f"    ! horizon not calibrated ({cal.get('reason', '')}) — "
               f"rendering unlevelled")
-        _ROLL[src] = empty
         return empty
-    if v["sign"] < 0:
-        roll = -roll
-    print(f"    roll sign {v['sign']:+d} (corr {v['corr']:+.2f} "
-          f"over {v['frames']} frames)")
-    _ROLL[src] = (t, roll)
+    print(f"    horizon: axis {cal['axis']}, {cal['gain']:+.2f} of body roll "
+          f"reaches the frame (corr {cal['corr']:+.2f}, {cal['frames']} frames)")
+    _ROLL[src] = lv.visible_roll(tel, cal)
     return _ROLL[src]
 
 
 def clip(src: str, t_in: float, t_out: float, out: Path,
          hwaccel: str | None = None, level: str | None = None,
-         telemetry: str | None = None) -> Path:
+         telemetry: str | None = None, preview: str | None = None) -> Path:
     """One approved clip as a 1080x1920 Reel.
 
     `level` is None, "constant" (one rotation for the clip) or "dynamic"
@@ -187,7 +186,7 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     rot_graph, cmd_file, applied = "", None, 0.0
     if level:
         from . import level as lv
-        tt, roll = roll_for(src, telemetry)
+        tt, roll = roll_for(src, telemetry, preview)
         if len(roll):
             span = (tt >= t_in) & (tt < t_out) & np.isfinite(roll)
             if span.sum() > 4:
@@ -242,7 +241,7 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
         nxt = proxy_mod.FALLBACK.get(hwaccel) or "none"
         first = (r.stderr.strip().splitlines() or ["no stderr"])[0]
         print(f"  ! {hwaccel} failed ({first[:110]}) — retrying with {nxt}")
-        return clip(src, t_in, t_out, out, nxt, level, telemetry)
+        return clip(src, t_in, t_out, out, nxt, level, telemetry, preview)
     if r.returncode != 0:
         raise RuntimeError(f"render failed: {r.stderr.strip()[:300]}")
     if cmd_file:
