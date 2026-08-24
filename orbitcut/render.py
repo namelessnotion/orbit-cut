@@ -22,7 +22,7 @@ angle demands, which is why an unlevelled clip loses nothing at all.
 Both source shapes work but not equally:
 
     8:7  3956x3460  ->  crop 1946x3460   2010 px of pan left over
-    16:9 3840x2160  ->  crop 1215x2160   2625 px of pan, far less trail ahead
+    16:9 3840x2160  ->  crop 1214x2160   2626 px of pan, far less trail ahead
 
 The 16:9 rides still clear 1080 wide, so they render — but a 9:16 slice of a
 wide frame shows much less of what is coming, and most of the approved clips are

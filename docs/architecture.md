@@ -500,6 +500,62 @@ toggle — on some rowdy descents the tilt *is* the point.
 | Safe area | ~250 px top / ~420 px bottom | Clear of caption and action-button overlays |
 | Decode path | VideoToolbox | Hardware HEVC decode on the M4 Max |
 
+### Measured — levelling needs three things the telemetry does not hand you
+
+The plan said horizon levelling is "nearly free", gated on the `IORI` check. The gate held up:
+phase 0 measured roll suppression at **+0.11**, so the camera did not level in body and the tilt
+is still in the pixels. What was not free was measuring the tilt.
+
+**The image plane is not a choice of axes.** Rolling rotates gravity *about the optical axis*, so
+the gravity vectors trace an arc whose plane normal IS that axis — an SVD of the centred unit
+vectors finds it without naming anything. The obvious alternative, "gravity is largest along
+vertical and smallest along forward", is wrong on exactly this camera: the chest mount's 13°
+forward pitch parks a constant 0.22 on the optical axis while the rolling component averages
+below it, so the two swap. A planted 4.0° offset with a ±12° swing read back as 12.5°/0.5° —
+identically under all four axis orders, because axis order was never the problem. The SVD
+returns 4.00° with correlation **1.000** under every one of them.
+
+**Zero has to come from the camera's axes, not the plane's.** The SVD basis has no relation to
+the image, so measuring the angle against it subtracts the mounting offset by definition: the
+median is zero by construction, and constant levelling would apply 0.0° forever while looking
+like it worked. The reference is taken from the raw axes instead — nearest axis to the normal is
+forward, and of the remaining two the one aligned with mean gravity is down. That assumes the
+camera is upright *on average*, which is weak enough to be safe: a mount a few degrees off is
+still nearly down, the other candidate is ninety degrees away.
+
+**Which way is positive is a GoPro convention, and it fails silently.** Get it backwards and
+levelling doubles the tilt rather than erroring. So it is read off the pixels: gradient
+orientations summed at four times their angle give each frame's structural tilt — trees are
+vertical, horizons horizontal, and the factor of four makes those the same claim — and the
+correlation between that and the measured roll settles the sign. Below 0.35 the ride renders
+unlevelled. On synthetic footage the correlation is ±1.00 over 12 frames and reversing the
+telemetry's handedness produces a byte-for-byte equivalent render.
+
+**What a rotation costs.** The crop shrinks by exactly what the applied angle demands, computed
+after the angle is known, so an unlevelled clip loses nothing at all:
+
+| Source | Crop | Max angle before the crop drops under 1080 wide |
+|---|---|---|
+| 8:7 4K | 1946×3460 | 25.0° (the clamp, not the limit) |
+| 8:7 5.3K | 2614×4648 | 25.0° |
+| 16:9 4K | 1214×2160 | **17.8°** |
+| 16:9 5.3K | 1680×2988 | 25.0° |
+
+Past that the render would be upscaling, which is worse than a tilt, so the angle is clamped and
+the clamp is reported.
+
+**End to end, on planted tilt** (`tools/level_selftest.py`): sources built at both shapes with a
+known 6° lean plus a ±9° swing, telemetry synthesised from the same angles, then the pipeline
+asked to undo it. Dynamic leaves 10–11% of the source's tilt; no output corner is darker than
+83/255, so nothing black is exposed. It also caught a bug that no unit test would have: driving
+`rotate` through `sendcmd` on a 0.1 s grid leaves each frame up to a tenth of a second stale, and
+at the 14 °/s a corner reaches that is 1.4° of lag — measured as 2.7° of tilt still in the
+picture after levelling. At 50 Hz, sampled mid-step, it comes out flat.
+
+**Constant is the default, dynamic is a choice.** Constant removes the mounting offset and costs
+almost nothing. Dynamic removes the lean as well, and on a bike the lean *is* the riding — the
+plan's "on some rowdy descents the tilt is the point" was right, so it stays a flag.
+
 ## Variant — night rides
 
 Setup: two lights, one bar-mounted (fixed, points where the bike points) and one helmet-mounted
