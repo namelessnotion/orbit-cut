@@ -540,6 +540,7 @@ body's roll actually reaches the picture.**
 | 9f1ea3a2 | 2 | 0.14 | 0.36 | 25.7° | 3.6° | +0.3° |
 | 4b57c2c8 | 2 | 0.42 | 0.67 | 25.8° | 11.0° | −0.9° |
 | e382330d | 2 | 0.12 | 0.38 | 23.5° | 2.9° | −0.4° |
+| **0603** (16:9) | — | — | **0.12** | 34° | — | −1.0° |
 
 Two consequences. **The mount is square** — the constant offset is under a degree on all three,
 so constant levelling has nothing to do and the default is `none`. And **the camera already
@@ -582,6 +583,24 @@ of the tilt and no output corner is darker than 99/255. It also caught a bug no 
 would: driving `rotate` through `sendcmd` on a 0.1 s grid leaves each frame up to a tenth of a
 second stale, and at the 14 °/s a corner reaches that is 1.4° of lag — measured as 2.7° of tilt
 still in the picture. At 50 Hz, sampled mid-step, it comes out flat.
+
+**Some rides have no dynamic fit at all, and that is a finding rather than a failure.** Ride
+0603 rolls 34° at the body and its picture will not line up with that at *any* lag — best
+|corr| 0.26 over a ±60 s scan, and the sign flips between quarters of the ride (−0.36, +0.06,
++0.15, −0.43). Nothing about timing explains it; the roll does not reach the frame.
+
+What cannot be established is *why*. The camera may have removed it, or the scenery's own lean
+may be drowning it — and those are not separable from here, because leaning trees and trail
+camber scatter the frames by about as much as a passed-through roll does. 0603 shows 10.0° of
+visible tilt; 4b57c2c8, which genuinely passes roll through, shows 10.8°. A first draft of the
+refusal branched on that spread and announced "already level in camera" below 8°, which would
+have been a confident label on a threshold separating nothing. It now reports only the
+consequence: the picture does not follow the body, so dynamic has nothing to act on.
+
+This also splits the two modes apart properly. **Constant never needed the telemetry** — it
+removes how the camera sits on the strap, which is the median tilt the frames show, no axis and
+no gain involved. So it stays available on rides whose dynamic fit is refused, and only dynamic
+requires the correlation to hold.
 
 **Constant is a no-op here and dynamic is a choice.** On a bike the lean *is* the riding — the
 plan's "on some rowdy descents the tilt is the point" was right — and with only 3–11° of
