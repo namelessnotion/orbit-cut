@@ -35,6 +35,13 @@ CREATE TABLE IF NOT EXISTS asset (
     camera_model   TEXT,
     recorded_at    TEXT,
 
+    -- The camera's own clock, from the container. Kept because it is what the
+    -- file says, and because the gap between it and the satellites is the
+    -- measurement: it ran 53-95 days slow across this library, drifting further
+    -- between sessions, and every date-based conclusion drawn from it was wrong.
+    recorded_at_gps TEXT,          -- true UTC start, from GPS9
+    clock_drift_s  REAL,           -- gps time minus container time, seconds
+
     has_gpmd       INTEGER,
     streams        TEXT,          -- json list of FourCCs actually present
     gps_lat        REAL,

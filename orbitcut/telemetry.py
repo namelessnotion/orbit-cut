@@ -103,6 +103,57 @@ MAX_GPS_GAP_S = 5.0
 # the odd missed sample.
 
 
+GPS_EPOCH = "2000-01-01T00:00:00Z"
+# GPS9 carries the only clock in the file that is not the camera's own. Its
+# `gps_days` counts days since 2000-01-01 UTC and `gps_secs` is seconds into
+# that day, both straight from the satellites.
+#
+# This matters because the camera's clock was 53 to 95 days behind reality
+# across this library, drifting further between sessions, and `recorded_at`
+# came from the MP4 container's creation_time — the camera's clock. Sun
+# elevation computed from it labelled eighteen daylight rides as night. The
+# humble exposure fallback got every one of them right; the "exact, closed-form"
+# solar calculation was wrong because its input was fiction.
+CLOCK_DRIFT_WARN_S = 300.0
+
+
+def gps_start_utc(df: pd.DataFrame) -> str | None:
+    """True UTC of the first sample, from the satellites rather than the camera.
+
+    `gps_time - t` rather than the first timestamp, because the GPS stream does
+    not necessarily start at the same instant as the video.
+    """
+    if "gps_days" not in df.columns or "gps_secs" not in df.columns:
+        return None
+    days = df["gps_days"].to_numpy(dtype=float)
+    secs = df["gps_secs"].to_numpy(dtype=float)
+    t = df["t"].to_numpy(dtype=float)
+    ok = np.isfinite(days) & np.isfinite(secs) & np.isfinite(t) & (days > 3650)
+    if not ok.any():
+        return None
+    i = int(np.flatnonzero(ok)[0])
+    start = (pd.Timestamp(GPS_EPOCH)
+             + pd.to_timedelta(float(days[i]), unit="D")
+             + pd.to_timedelta(float(secs[i]) - float(t[i]), unit="s"))
+    return start.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def clock_drift_s(container_time: str | None, gps_time: str | None) -> float | None:
+    """How far the camera's clock is from the satellites', in seconds."""
+    if not container_time or not gps_time:
+        return None
+    try:
+        a = pd.Timestamp(container_time)
+        b = pd.Timestamp(gps_time)
+    except (ValueError, TypeError):
+        return None
+    if a.tzinfo is None:
+        a = a.tz_localize("UTC")
+    if b.tzinfo is None:
+        b = b.tz_localize("UTC")
+    return float((b - a).total_seconds())
+
+
 def _gap_aware_interp(grid: np.ndarray, t: np.ndarray,
                       v: np.ndarray) -> np.ndarray:
     """Interpolate onto `grid`, but leave NaN where nothing was measured.
@@ -228,6 +279,7 @@ def extract(path: str | Path, content_hash: str) -> dict[str, Any]:
         "streams": present,
         "rates": rates,
         "duration_s": float(end),
+        "gps_start_utc": gps_start_utc(df),
         **_diagnostics(df),
     }
 

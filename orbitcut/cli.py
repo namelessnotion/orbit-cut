@@ -946,6 +946,87 @@ def cmd_review(args) -> int:
     return 0
 
 
+def cmd_retime(args) -> int:
+    """Repair recording times and lighting from the GPS clock in the parquets.
+
+    No re-ingest: `gps_days`, `gps_secs`, lat and lon are already in every
+    telemetry file, so this is a pass over data that has been sitting there the
+    whole time. That is also the uncomfortable part — the true time was always
+    available and nothing compared it against the camera's.
+
+    Chapters are handled explicitly. They share one container timestamp, so a
+    late chapter of a long ride carried the start of the first; where a chapter
+    has its own GPS it gets its own time, and where it does not it is offset by
+    the durations of the chapters before it.
+    """
+    import pandas as pd
+
+    from . import telemetry as tel_mod
+
+    conn = db.connect()
+    rows = [dict(a) for a in db.assets(conn)]
+    by_ride: dict[str, list] = {}
+    for a in rows:
+        by_ride.setdefault(a["ride_id"] or a["content_hash"], []).append(a)
+
+    fixed = drifted = relit = 0
+    print(f"  {'file':<20}{'container':>18}{'from GPS':>18}{'drift':>9}  lighting")
+    for ride, group in sorted(by_ride.items()):
+        group.sort(key=lambda a: a["chapter"] or 0)
+        anchor = None                     # (gps start, chapter) for offsetting
+        elapsed = 0.0
+        for a in group:
+            tp = a["telemetry_path"]
+            gps_time = None
+            if tp and Path(tp).exists():
+                try:
+                    gps_time = tel_mod.gps_start_utc(pd.read_parquet(tp))
+                except Exception as exc:
+                    print(f"  ! {a['filename']}: {exc}")
+            if gps_time:
+                anchor, elapsed = gps_time, 0.0
+            elif anchor:
+                # No GPS in this chapter, but an earlier one had it: the
+                # chapters are contiguous, so the offset is just their duration.
+                gps_time = (pd.Timestamp(anchor)
+                            + pd.to_timedelta(elapsed, unit="s")
+                            ).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+            elapsed += float(a["duration_s"] or 0.0)
+
+            if not gps_time:
+                continue
+            drift = tel_mod.clock_drift_s(a["recorded_at"], gps_time)
+            fields = {"recorded_at_gps": gps_time, "clock_drift_s": drift}
+            note = ""
+            if drift is not None and abs(drift) > tel_mod.CLOCK_DRIFT_WARN_S:
+                fields["recorded_at"] = gps_time
+                drifted += 1
+            if a["gps_lat"] is not None:
+                elev = tel_mod.sun_elevation(a["gps_lat"], a["gps_lon"], gps_time)
+                label = tel_mod.lighting_label(elev)
+                if label != a["lighting"]:
+                    note = f"{a['lighting']} -> {label}"
+                    relit += 1
+                fields.update(sun_elevation=elev, lighting=label,
+                              lighting_source="sun")
+            if not args.dry_run:
+                db.upsert_asset(conn, a["content_hash"], **fields)
+            fixed += 1
+            print(f"  {a['filename']:<20}{(a['recorded_at'] or '')[:16]:>18}"
+                  f"{gps_time[:16]:>18}"
+                  f"{(drift / 86400 if drift is not None else 0):>8.1f}d  {note}")
+    if not args.dry_run:
+        conn.commit()
+    print(f"\n  {fixed} file(s) given a satellite-derived start time, "
+          f"{drifted} where the camera's clock was more than "
+          f"{tel_mod.CLOCK_DRIFT_WARN_S / 60:.0f} minutes out, "
+          f"{relit} lighting label(s) corrected."
+          + ("  (dry run — nothing written)" if args.dry_run else ""))
+    print("  The camera's own clock is still wrong. This repairs the record,")
+    print("  not the source: set the clock, and leave GPS on to keep it honest.")
+    return 0
+
+
 def cmd_log(args) -> int:
     """What the decision log holds, and what it is enough for yet."""
     import json as _json
@@ -1450,6 +1531,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=0, help="default: pick a free one")
     p.add_argument("--no-open", action="store_true", help="do not open a browser")
     p.set_defaults(fn=cmd_review)
+
+    p = sub.add_parser("retime", help="repair recording times and lighting "
+                                      "from the GPS clock")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show what would change without writing")
+    p.set_defaults(fn=cmd_retime)
 
     sub.add_parser("log", help="what the decision log holds").set_defaults(fn=cmd_log)
 
