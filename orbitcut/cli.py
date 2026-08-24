@@ -1632,27 +1632,38 @@ def cmd_rank(args) -> int:
             "feat": "".join(k[0] for k in cal_mod.FEATURES if k in have),
             "clip": clip,
             "top30": float(best.mean()),
+            # The ride's floor. `clip` and `top30` both ask how good the best
+            # part is, and neither can tell "one great window in a dull ride"
+            # from "one of many". The median second can: it says whether the
+            # ride is good *throughout*. Worth a column because on this library
+            # it is the column that agrees with Anthony — see the note below.
+            "floor": float(np.median(comp)),
             "peak": float(comp.max()),
             "air": sum(r["air_events"] or 0 for r in group),
             "longest": max((r["air_longest_s"] or 0) for r in group),
             "light": group[0]["lighting"] or "-",
         })
 
-    key = "top30" if getattr(args, "by", "clip") == "top30" else "clip"
+    key = getattr(args, "by", "clip")
+    if key not in ("clip", "top30", "floor"):
+        key = "clip"
     rows.sort(key=lambda r: (r[key] if np.isfinite(r[key]) else -1), reverse=True)
     if args.top:
         rows = rows[:args.top]
 
-    hdr = (f"{'ride':<8}{'ch':>3}{'dur':>8}{'feat':>6}{'clip':>7}{'top30':>8}{'peak':>7}"
-           f"{'air':>5}{'longest':>9}{'light':>10}")
+    hdr = (f"{'ride':<8}{'ch':>3}{'dur':>8}{'feat':>6}{'clip':>7}{'top30':>8}"
+           f"{'floor':>7}{'peak':>7}{'air':>5}{'longest':>9}{'light':>10}")
     print(hdr); print("-" * len(hdr))
     for r in rows:
         print(f"{r['ride']:<8}{r['chapters']:>3}{r['dur']:>7.1f}m{r['feat']:>6}"
-              f"{r['clip']:>7.2f}{r['top30']:>8.2f}{r['peak']:>7.2f}"
+              f"{r['clip']:>7.2f}{r['top30']:>8.2f}{r['floor']:>7.2f}{r['peak']:>7.2f}"
               f"{r['air']:>5}{r['longest']:>8.2f}s{r['light']:>10}")
     print()
     print(f"  clip  = best contiguous {CLIP_S} s — does this ride contain one great")
     print("          clip? Sorted by this.")
+    print("  floor = the ride's median second. Where clip and top30 both ask")
+    print("          how good the best part is, this asks whether the ride is")
+    print("          good throughout, and one lucky burst cannot raise it.")
     print("  top30 = the 30 best seconds from anywhere in the ride — how much good")
     print("          footage it holds in total. A long even ride wins on this and")
     print("          loses on clip; a ride with one real sprint does the reverse.")
@@ -1779,8 +1790,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("rank", help="rank rides against each other")
     p.add_argument("--top", type=int, help="only the best N")
-    p.add_argument("--by", choices=("clip", "top30"), default="clip",
-                   help="sort by best contiguous clip (default) or total good footage")
+    p.add_argument("--by", choices=("clip", "top30", "floor"), default="clip",
+                   help="sort by best contiguous clip (default), total good "
+                        "footage, or the ride's median second")
     p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
     p.add_argument("--sharpness", type=float, help="peak emphasis; see calibrate")
     p.set_defaults(fn=cmd_rank)
