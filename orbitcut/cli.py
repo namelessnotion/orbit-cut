@@ -994,6 +994,12 @@ def cmd_retime(args) -> int:
             elapsed += float(a["duration_s"] or 0.0)
 
             if not gps_time:
+                # Say so rather than skipping quietly. A file whose receiver
+                # never locked looks identical to one with no GPS stream at
+                # all, and the difference matters: the first has a GPS stream
+                # full of placeholders that other stages have to know to refuse.
+                print(f"  {a['filename']:<20}{(a['recorded_at'] or '')[:16]:>18}"
+                      f"{'no locked GPS':>18}")
                 continue
             drift = tel_mod.clock_drift_s(a["recorded_at"], gps_time)
             fields = {"recorded_at_gps": gps_time, "clock_drift_s": drift}

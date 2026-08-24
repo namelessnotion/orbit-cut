@@ -356,8 +356,25 @@ def compute(telemetry_path: str, imu_path: str | None, duration_s: float) -> pd.
     # missing fix costs nothing; failing closed would silently discard the GPS
     # of every camera that does not record GPSF.
     fix = on_grid("gps_fix")
-    if np.isfinite(fix).any() and np.nanmax(fix) >= 2:
+    has_fix = bool(np.isfinite(fix).any())
+    locked = has_fix and float(np.nanmax(fix)) >= 2
+    if locked:
         speed = np.where(fix >= 1.5, speed, np.nan)     # 2 = 2D lock, 3 = 3D
+    elif has_fix:
+        # The receiver reported its state for every second and the state was
+        # "no lock". That is not a missing field, it is a measurement of
+        # failure, and the two were being treated the same.
+        #
+        # Five rides in this library are like that: fix 0 throughout, DOP
+        # pinned at 100, position 0.0/0.0, and `gps_speed2d` exactly 0.00 for
+        # the whole file. Failing open passed that through as a *finite* zero
+        # for 768 of 769 seconds, which put them in the speed+turn+rough
+        # availability bucket on the strength of a number the receiver had
+        # already disowned — and fed ~3800 fabricated zeros into the corpus
+        # percentile for speed, deflating the scale for every real ride.
+        print("  ! GPS never locked (fix 0 for the whole file) — no speed, "
+              "and this ride ranks against the ones without GPS")
+        speed = np.full(len(grid), np.nan)
     out["speed_ms"] = speed
 
     alt = on_grid("gps_alt")
@@ -370,7 +387,14 @@ def compute(telemetry_path: str, imu_path: str | None, duration_s: float) -> pd.
     # jumps come from — so drop those seconds rather than filtering them later.
     dop = on_grid("gps_dop")
     if np.isfinite(dop).any():
-        alt = np.where(np.isfinite(dop) & (dop > GPS_DOP_MAX), np.nan, alt)
+        # Gate speed on DOP as well, not only altitude. The asymmetry was
+        # accidental: a fix geometrically weak enough to ruin altitude is
+        # weak enough to ruin speed, and on the never-locked files DOP sits
+        # at 100 — the receiver shouting that it has nothing.
+        bad = np.isfinite(dop) & (dop > GPS_DOP_MAX)
+        alt = np.where(bad, np.nan, alt)
+        out["speed_ms"] = np.where(bad, np.nan, out["speed_ms"])
+        speed = out["speed_ms"].to_numpy()
     grade, rejected = bound_by_speed(descent_rate(alt), speed)
     out["grade"] = grade
     out.attrs["grade_rejected"] = rejected

@@ -120,8 +120,15 @@ CLOCK_DRIFT_WARN_S = 300.0
 def gps_start_utc(df: pd.DataFrame) -> str | None:
     """True UTC of the first sample, from the satellites rather than the camera.
 
-    `gps_time - t` rather than the first timestamp, because the GPS stream does
+    `gps_time - t` rather than the timestamp itself, because the GPS stream does
     not necessarily start at the same instant as the video.
+
+    Only locked samples count. An unlocked receiver still emits a timestamp,
+    and it is a placeholder: five files in this library report a constant
+    `gps_days` of 7736 with fix 0 and DOP 100 throughout, which decodes to
+    2021-03-07T00:00:00 and read as the camera clock being 1795 days *fast*.
+    Taking the first sample believed it. The median of the locked samples is
+    both gated and robust to the odd bad row.
     """
     if "gps_days" not in df.columns or "gps_secs" not in df.columns:
         return None
@@ -129,13 +136,15 @@ def gps_start_utc(df: pd.DataFrame) -> str | None:
     secs = df["gps_secs"].to_numpy(dtype=float)
     t = df["t"].to_numpy(dtype=float)
     ok = np.isfinite(days) & np.isfinite(secs) & np.isfinite(t) & (days > 3650)
-    if not ok.any():
+    if "gps_fix" in df.columns:
+        fix = df["gps_fix"].to_numpy(dtype=float)
+        ok &= np.isfinite(fix) & (fix >= 2)
+    if ok.sum() < 10:
         return None
-    i = int(np.flatnonzero(ok)[0])
     start = (pd.Timestamp(GPS_EPOCH)
-             + pd.to_timedelta(float(days[i]), unit="D")
-             + pd.to_timedelta(float(secs[i]) - float(t[i]), unit="s"))
-    return start.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+             + pd.to_timedelta(days[ok], unit="D")
+             + pd.to_timedelta(secs[ok] - t[ok], unit="s"))
+    return pd.Series(start).median().strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
 def clock_drift_s(container_time: str | None, gps_time: str | None) -> float | None:
