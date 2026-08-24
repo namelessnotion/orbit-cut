@@ -42,6 +42,19 @@ CREATE TABLE IF NOT EXISTS asset (
     recorded_at_gps TEXT,          -- true UTC start, from GPS9
     clock_drift_s  REAL,           -- gps time minus container time, seconds
 
+    -- What was being shot. Recorded, not inferred: the classifier that would
+    -- derive these is phase 4, and today every ride in this library is the same
+    -- on both axes, so hand-assignment is both cheaper and more accurate.
+    --
+    -- Deliberately NOT part of the calibration key. The plan calls for
+    -- availability x lighting x (style, mount), and that is right the day any
+    -- of them varies — but a key whose every row reads "bikejoring/chest" is
+    -- arithmetically identical to no key, and bucketing on it would only thin
+    -- the percentile tables. The columns exist so the decision log can be
+    -- conditioned on them later without reconstructing which ride was which.
+    style          TEXT,           -- bikejoring | solo
+    mount          TEXT,           -- chest | helmet
+
     has_gpmd       INTEGER,
     streams        TEXT,          -- json list of FourCCs actually present
     gps_lat        REAL,

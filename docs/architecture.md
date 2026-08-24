@@ -128,13 +128,43 @@ Every signal the pipeline wants is present.
 |---|---|---|---|
 | ACCL | ~200 Hz | roughness, impacts, **freefall/airtime**, braking | yes |
 | GYRO | 200–3200 Hz | yaw rate → turn count, cornering intensity | yes |
-| GPS5 | 18 Hz | speed, gradient, route → trail ID | yes |
+| GPS5 | 18 Hz | speed, gradient, route → trail ID | superseded by GPS9 on this body |
 | GRAV | frame rate | **mount inference**, horizon leveling | yes |
 | CORI | frame rate | camera orientation in world → **head-turn compensation** | yes |
 | IORI | frame rate | image orientation vs camera body → **what the camera already corrected** | yes |
 | SHUT/ISOE | frame rate | low-light / motion-blur quality gates | yes |
 | Frames | 30–120 fps | subject, scene, dog, trail region, aesthetics | yes |
-| GPS9 | 10 Hz | higher-precision GPS w/ per-sample timing | HERO13+ only |
+| GPS9 | 10 Hz | higher-precision GPS, per-sample timing, DOP and fix | **yes — this is what the HERO11 writes** |
+
+**Correction: GPS9 is not HERO13-only.** The table above said so for several revisions and the
+code has always depended on the opposite — `gps.py` prefers GPS9 and parses it in-tree because
+telemetrik returns it as raw bytes. Your HERO11 writes GPS9, which is where the per-sample fix,
+DOP and UTC timestamp come from, and all three turned out to matter: the timestamp caught a
+camera clock 53–95 days slow, and the fix caught five rides whose receiver never locked. Left
+uncorrected, that row would have talked a future decision out of relying on any of it.
+
+### Measured — a fix field that says zero is not a missing fix field
+
+`score.compute` gated speed on the GPS fix only when the stream reported a lock *somewhere*, so
+that a camera which never writes GPSF would not lose its GPS entirely. Reasonable. But it made
+"no fix field" and "fix field present, reading zero on every sample" the same case, and they are
+opposites: the second is the receiver telling you, continuously, that it has nothing.
+
+Five files in this library are exactly that — fix 0 throughout, DOP pinned at 100, position
+0.0/0.0, `gps_days` a constant placeholder, and `gps_speed2d` exactly 0.00 for the whole ride.
+They were passed through as a *finite* zero on 768 of 769 seconds, which put them in the
+speed+turn+rough availability bucket on the strength of a number the receiver had disowned, and
+fed roughly 3,800 fabricated zeros into the corpus percentile for speed — deflating the scale
+for every genuinely-located ride.
+
+A missing fix field still fails open. A fix field that never reaches 2 now costs speed and
+grade, and the ride ranks against the ones with no GPS at all, which is what it is. DOP gates
+speed as well as altitude; that asymmetry was accidental, and a fix too weak geometrically for
+altitude is too weak for speed.
+
+The general form is the one this project keeps paying for: **a fallback that is right for one
+absence must not be the default for every absence.** It cost the GPS column naming, it cost the
+corpus that renormalised over missing features, and it cost this.
 
 ### Shoot 8:7 — the single biggest quality decision in this pipeline
 
@@ -630,6 +660,31 @@ footage — not true of any vision-first design.
 Fuse to `lighting ∈ {day, twilight, night}` on the classification record. Disagreement is the
 interesting output: solar elevation saying *day* while ISO sits pinned means dense canopy, a
 muddy lens, or a camera that spent the ride in a pack.
+
+### Measured — the lighting labels were wrong twice over, and the night path has never run
+
+Two independent failures, both found only once the library was checked against ground truth
+(every ride: chest mount, bikejoring, daylight).
+
+**Solar elevation was computed from a camera clock 53–95 days slow.** `recorded_at` came from the
+MP4 container's `creation_time`, and the drift grew between sessions, so no constant offset could
+have repaired it. Eighteen daylight rides were labelled night. The exposure fallback — the humble
+one — got those right; the "exact, closed-form" solar calculation was wrong because its input was
+fiction. GPS9 carries true UTC and always did. `orbitcut retime` repairs the record from the
+parquets without re-ingesting anything.
+
+**And the exposure fallback was guessing anyway.** Under 400 ISO it said day, over 1600 night, and
+between them *twilight* — but this document already said dense canopy at midday and open sky at
+dusk land in the same band. Against ground truth it was wrong 39 times out of 76. With no night
+footage at all to place those thresholds against, placing them was never a measurement. It now
+returns `day` when the frame is bright and `unknown` otherwise: bright is something the camera can
+establish, dark is a question.
+
+**So the night machinery below has still never seen a night ride.** The calibration bucket, the
+illumination gate and the retroreflective threshold remain designs with zero data behind them, and
+the MEDIUM risk on retroreflective return at bikejoring distances is fully open. That is worth
+remembering the first time a real night ride goes through: nothing will have tested that path
+before it.
 
 ### What survives the dark, and what breaks
 

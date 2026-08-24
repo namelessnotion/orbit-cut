@@ -947,6 +947,60 @@ def cmd_review(args) -> int:
     return 0
 
 
+def cmd_label(args) -> int:
+    """Record what was being shot: style and mount, by hand.
+
+    The plan has a chest/helmet classifier built from CORI yaw against GPS
+    heading, and it is a good design. It is also phase 4, and it would be
+    answering a question that currently has one answer — every ride in this
+    library is bikejoring from a chest mount. Hand-assignment is cheaper and,
+    right now, strictly more accurate than any classifier could be.
+
+    These are not calibration keys. A key whose every row reads the same is
+    arithmetically identical to no key, and bucketing on it would only thin the
+    percentile tables. They exist so the decision log can be conditioned on them
+    the day the library stops being uniform — the same argument the architecture
+    doc makes for building the archive seam before it is needed.
+    """
+    conn = db.connect()
+    rows = [dict(a) for a in db.assets(conn)]
+    if args.asset:
+        rows = [a for a in rows
+                if args.asset in (a["ride_id"] or "")
+                or args.asset in (a["filename"] or "")
+                or (a["content_hash"] or "").startswith(args.asset)]
+    if not rows:
+        print(f"no asset matching {args.asset!r}" if args.asset else "nothing ingested yet")
+        return 1
+
+    fields = {k: v for k, v in (("style", args.style), ("mount", args.mount)) if v}
+    if not fields:
+        # No values given: report what is on record rather than doing nothing.
+        counts: dict[tuple, int] = {}
+        for a in rows:
+            counts[(a["style"] or "—", a["mount"] or "—")] = \
+                counts.get((a["style"] or "—", a["mount"] or "—"), 0) + 1
+        print(f"  {'style':<14}{'mount':<10}{'files':>6}")
+        for (st, mo), n in sorted(counts.items()):
+            print(f"  {st:<14}{mo:<10}{n:>6}")
+        print("\n  Set them with:  orbitcut label --style bikejoring --mount chest")
+        return 0
+
+    changed = 0
+    for a in rows:
+        if all(a.get(k) == v for k, v in fields.items()):
+            continue
+        if not args.dry_run:
+            db.upsert_asset(conn, a["content_hash"], **fields)
+        changed += 1
+    if not args.dry_run:
+        conn.commit()
+    what = ", ".join(f"{k}={v}" for k, v in fields.items())
+    print(f"  {what} on {changed} of {len(rows)} file(s)"
+          + ("  (dry run — nothing written)" if args.dry_run else ""))
+    return 0
+
+
 def cmd_retime(args) -> int:
     """Repair recording times and lighting from the GPS clock in the parquets.
 
@@ -1564,6 +1618,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=0, help="default: pick a free one")
     p.add_argument("--no-open", action="store_true", help="do not open a browser")
     p.set_defaults(fn=cmd_review)
+
+    p = sub.add_parser("label", help="record style and mount by hand")
+    p.add_argument("asset", nargs="?", help="limit to one ride; default is all")
+    p.add_argument("--style", choices=("bikejoring", "solo"))
+    p.add_argument("--mount", choices=("chest", "helmet"))
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_label)
 
     p = sub.add_parser("retime", help="repair recording times and lighting "
                                       "from the GPS clock")
