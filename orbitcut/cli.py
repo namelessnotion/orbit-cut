@@ -629,6 +629,38 @@ def _show_weights(w: dict[str, float]) -> None:
     print(f"  weights   {parts}")
 
 
+def _weights_notice(table, weights: dict[str, float] | None) -> None:
+    """Say which weights are actually in force, whenever that could surprise.
+
+    Editing `WEIGHTS` in calibrate.py and re-running `rank` does nothing, and
+    the reason is deliberate: `apply()` defaults to the weights the *table* was
+    fitted with, because the stored level distribution is a distribution of
+    levels and a level computed with different weights is a different quantity.
+    But "deliberate" and "silent" are different things, and this one silently
+    disagreed with a file the user had just edited — while `--weights` picked
+    the edit up, because that path starts from the module's dict. Same edit,
+    two answers, no explanation.
+    """
+    if weights:
+        _show_weights(weights)
+        if not cal_mod.weights_match(table, weights):
+            print("  note      not the weights this calibration was fitted with, so")
+            print("            cross-ride comparison is approximate. If you settle on")
+            print("            them: orbitcut calibrate --weights ...")
+        print()
+        return
+    fitted = (table or {}).get("weights")
+    if fitted and not cal_mod.weights_match(table, dict(cal_mod.WEIGHTS)):
+        _show_weights(fitted)
+        print("  note      these are the calibration's weights, not the ones in")
+        print("            calibrate.py — editing that file changes nothing until")
+        print("            you re-run `orbitcut calibrate`. To try the edited")
+        print("            values right now, pass them: "
+              + "orbitcut rank --weights "
+              + ",".join(f"{k}={v:g}" for k, v in cal_mod.WEIGHTS.items() if v))
+        print()
+
+
 # ---------------------------------------------------------------------- score
 def _find(conn, needle: str):
     """Match an asset by hash prefix, filename fragment, or ride number."""
@@ -761,8 +793,7 @@ def cmd_overlay(args) -> int:
     weights = _weights(args.weights)
     scored = cal_mod.apply(pd.read_parquet(row["scores_path"]), table, weights,
                            getattr(args, "sharpness", None))
-    if weights:
-        _show_weights(weights)
+    _weights_notice(table, weights)
     ev_path = config.derived_dir(row["content_hash"]) / "air_events.parquet"
     events = pd.read_parquet(ev_path) if ev_path.exists() else None
 
@@ -1277,13 +1308,7 @@ def cmd_rank(args) -> int:
         return 1
 
     weights = _weights(args.weights)
-    if weights:
-        _show_weights(weights)
-        if not cal_mod.weights_match(table, weights):
-            print("  note      not the weights this calibration was fitted with, so")
-            print("            cross-ride comparison is approximate. If you settle on")
-            print("            them: orbitcut calibrate --weights ...")
-        print()
+    _weights_notice(table, weights)
     if "levels" not in table:
         print("  This calibration predates availability buckets, so rides without\n"
               "  GPS will rank too highly. Re-run `orbitcut calibrate`.\n")
