@@ -127,6 +127,46 @@ GRID = np.linspace(0, 100, 101)
 # adequate one on the two minor features.
 SHARPNESS = 12
 
+# --- the part that is not obvious: sharpness cancels the weights -------------
+#
+# These two knobs are not independent, and at high p the weights stop meaning
+# what they look like they mean. A power mean at p = 12 is nearly a maximum, so
+# a second that is excellent at *one* feature scores high almost regardless of
+# how little that feature is weighted. Scoring a second that is 1.0 on one
+# feature and 0.0 on the rest:
+#
+#     weights                      p   pure rough   pure turn    gap
+#     0.1 / 0.3 / 0.6             12        0.958       0.905   0.054
+#                                  8        0.938       0.860   0.078
+#                                  4        0.880       0.740   0.140
+#                                  2        0.775       0.548   0.227
+#     0 / 0.15 / 0.85             12        0.987       0.854   0.133
+#                                  2        0.922       0.387   0.535
+#     0 / 0 / 1.00             any p        1.000       0.000   1.000
+#
+# At 0.1/0.3/0.6 and p = 12 — the settings this library was tuned to — a
+# pure-turn second scores 0.905 against a pure-rough second's 0.958. Turn was
+# carrying half of rough's weight and losing five points of score. That is why
+# moving rough from 0.2 to 0.6 to 0.8 never felt like it did much: past about
+# p = 8 the weighting is close to inert for exactly the specialised seconds a
+# highlight is made of.
+#
+# The consequences are worth stating plainly:
+#
+#   * To genuinely de-emphasise a feature at high sharpness you must set it to
+#     zero. Small-but-nonzero does almost nothing.
+#   * To keep a feature in play *and* de-emphasise it, lower p. Weights only
+#     behave the way they read at low sharpness.
+#   * A single feature at 1.00 makes sharpness irrelevant — a power mean of one
+#     term is that term — so setting one weight to 1.00 silently turns this
+#     knob off as well.
+#
+# Found from 102 decisions, where the composite predicted approvals within a
+# ride at AUC 0.560 while `rough` alone managed 0.850 and `turn` managed 0.180
+# — anti-predictive. A composite weighted 60% toward rough was still promoting
+# turn-dominated clips, because sharpness let them in. The weighting was not
+# wrong so much as it was not being applied.
+
 FEATURES = ("speed", "turn", "rough", "descent")
 SUB = {"speed": "s_speed", "turn": "s_turn", "rough": "s_rough", "descent": "s_descent"}
 MIN_BUCKET = 200  # below this, a bucket's percentiles are noise
