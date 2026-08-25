@@ -947,6 +947,66 @@ def cmd_review(args) -> int:
     return 0
 
 
+def cmd_orient(args) -> int:
+    """Which way up each file really is, and where the container disagrees.
+
+    Orientation is the one property that is both trivially checkable and
+    catastrophic to get wrong, and the container is not a reliable source for
+    it. GX010600 gives three different answers about itself — display matrix 90,
+    legacy `rotate` tag 270, and 180 recorded at ingest — while its gravity is
+    indistinguishable from GX010598's for the whole ten minutes.
+
+    That file rendered sideways and nothing caught it: the 9:16 crop scales
+    without distortion whichever frame it lands on, so the output is clean,
+    correctly sized, and wrong. This is the check that would have found it in a
+    second instead of in a finished reel.
+    """
+    conn = db.connect()
+    rows = [dict(a) for a in db.assets(conn)]
+    if args.asset:
+        rows = [a for a in rows
+                if args.asset in (a["ride_id"] or "")
+                or args.asset in (a["filename"] or "")]
+    if not rows:
+        print("nothing ingested yet" if not args.asset
+              else f"no asset matching {args.asset!r}")
+        return 1
+
+    from . import render as rn
+
+    print(f"  {'file':<18}{'container':>10}{'gravity':>9}   what happens")
+    disagree, unknown = [], []
+    for a in sorted(rows, key=lambda r: r["filename"] or ""):
+        container = int(a["rotation"] or 0)
+        measured = rn.upright_from_gravity(a["telemetry_path"])
+        if measured is None:
+            note, bucket = "no reading — container wins", unknown
+        elif measured != container:
+            note, bucket = f"renders at {measured}°, not {container}°", disagree
+        else:
+            note, bucket = "agree", None
+        if bucket is not None or args.all:
+            got = "—" if measured is None else f"{measured}°"
+            print(f"  {a['filename']:<18}{container:>9}°{got:>9}   {note}")
+        if bucket is not None:
+            bucket.append(a["filename"])
+
+    print()
+    if disagree:
+        print(f"  {len(disagree)} file(s) whose container contradicts the "
+              f"accelerometer. Rendering")
+        print("  uses gravity, so these are already handled — but any reel made "
+              "before")
+        print("  this check existed should be looked at:")
+        print("      orbitcut render " + (disagree[0].split(".")[0][-4:]))
+    else:
+        print("  every file with telemetry agrees with its container")
+    if unknown:
+        print(f"  {len(unknown)} file(s) have no usable gravity reading; those "
+              f"follow the container.")
+    return 0
+
+
 def cmd_relink(args) -> int:
     """Point the catalog back at the originals after they have moved.
 
@@ -1815,6 +1875,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=0, help="default: pick a free one")
     p.add_argument("--no-open", action="store_true", help="do not open a browser")
     p.set_defaults(fn=cmd_review)
+
+    p = sub.add_parser("orient", help="which way up each file really is")
+    p.add_argument("asset", nargs="?", help="limit to one ride or filename")
+    p.add_argument("--all", action="store_true",
+                   help="list every file, not just the disagreements")
+    p.set_defaults(fn=cmd_orient)
 
     p = sub.add_parser("relink", help="find moved originals again by content hash")
     p.add_argument("path", help="directory to scan, or one file")

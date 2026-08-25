@@ -19,6 +19,11 @@ and so the mount's tilt is still in the pixels. `--level` picks what to do about
 it and `level.py` measures it; the crop then shrinks by exactly as much as the
 angle demands, which is why an unlevelled clip loses nothing at all.
 
+**Which way is up comes from gravity, not from the container.** ffmpeg's
+autorotation is off here and the rotation is applied explicitly, because a crop
+measured in pixels is meaningless until the frame shape is settled and the
+container is not a reliable source for it — see `upright_from_gravity`.
+
 Both source shapes work but not equally:
 
     8:7  3956x3460  ->  crop 1946x3460   2010 px of pan left over
@@ -63,11 +68,114 @@ def probe(path: str) -> dict[str, Any]:
               and not s.get("disposition", {}).get("attached_pic")), None)
     if not v:
         raise RuntimeError(f"no video stream in {path}")
+    rot = 0
+    for sd in v.get("side_data_list") or []:
+        if "rotation" in sd:
+            try:
+                rot = int(round(float(sd["rotation"]))) % 360
+            except (TypeError, ValueError):
+                pass
     return {
+        # Coded dimensions — the shape of the frame *before* any rotation.
         "width": int(v["width"]), "height": int(v["height"]),
+        "rotation": rot,
         "has_audio": any(s.get("codec_type") == "audio" for s in streams),
         "fps": v.get("r_frame_rate", "30/1"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Orientation
+#
+# This used to be left entirely to ffmpeg's autorotation, and the crop geometry
+# was computed from the *coded* dimensions — the shape before rotation. On a
+# library where every file is 0 or 180 those two never disagree, so it worked
+# for 96 files out of 97 and failed silently on the one that differs.
+#
+# GX010600 carries a display matrix this ffprobe reads as 90 (its legacy
+# `rotate` tag says 270, and the value recorded at ingest was 180 — three
+# answers from one file). Its physics says otherwise: mean gravity is
+# (+0.01, -0.94, +0.26), which is GX010598's (+0.02, -0.93, +0.22) to within
+# noise. Same inverted chest mount, same 15-degree downward strap angle, same
+# ride. The camera's orientation sensor caught something at power-on that the
+# accelerometer flatly contradicts for the following ten minutes.
+#
+# The failure was invisible for two reasons worth remembering. The crop box is
+# 9:16 by construction, so it scales to 1080x1920 without distortion no matter
+# which frame it lands on — the picture comes out clean, just wrong. And the
+# proxy stage and the render stage reached different answers on the same file
+# from the same ffmpeg, so there was never one orientation to be wrong about.
+#
+# So do not ask the container. Gravity is measured rather than declared, it is
+# recorded 200 times a second for the whole ride, and it cannot be set wrong by
+# a sensor glitch at the moment the record button is pressed.
+# ---------------------------------------------------------------------------
+
+# Below this the camera was pointing near-straight up or down and none of the
+# lateral axes carry a usable direction.
+MIN_GRAVITY = 0.30
+
+
+def upright_from_gravity(telemetry: str | None) -> int | None:
+    """Degrees clockwise that make the coded frame upright, or None.
+
+    `grav_1` is the camera's vertical axis (README, "Axis order"): positive
+    when the camera is the right way up, negative when it is inverted on the
+    chest strap. That is the whole rule for this library, and it is checkable —
+    0609 reads +0.96 and has no display matrix at all; 0598, 0600 and 0603 all
+    read about -0.94 and all want 180.
+
+    A genuinely sideways mount would show up as `grav_0` dominating, and this
+    deliberately returns None for that case rather than guessing which way round
+    it goes. There is no such file here to check a sign against, and a wrong
+    sign would put the horizon 180 degrees out while looking entirely plausible
+    in the code. When it returns None the caller falls back to the container,
+    which is exactly what happened before this function existed.
+    """
+    if not telemetry or not Path(telemetry).exists():
+        return None
+    import pandas as pd
+
+    try:
+        d = pd.read_parquet(telemetry, columns=["grav_0", "grav_1"])
+    except Exception:
+        return None
+    g0, g1 = float(d["grav_0"].mean()), float(d["grav_1"].mean())
+    if not (np.isfinite(g0) and np.isfinite(g1)):
+        return None
+    if max(abs(g0), abs(g1)) < MIN_GRAVITY:
+        return None
+    if abs(g1) < abs(g0):
+        return None  # lateral: real, but unvalidated. See the docstring.
+    return 0 if g1 > 0 else 180
+
+
+def orientation(meta: dict[str, Any], telemetry: str | None) -> tuple[int, str]:
+    """(degrees clockwise to apply, where the number came from)."""
+    container = int(meta.get("rotation") or 0) % 360
+    measured = upright_from_gravity(telemetry)
+    if measured is None:
+        return container, "container"
+    if measured != container:
+        return measured, f"gravity (container says {container})"
+    return measured, "gravity"
+
+
+def _orient_graph(deg: int) -> str:
+    """Filter fragment putting the coded frame upright. Trailing comma."""
+    if deg == 180:
+        return "hflip,vflip,"          # cheaper than two transposes
+    if deg == 90:
+        return "transpose=1,"          # clockwise
+    if deg == 270:
+        return "transpose=2,"          # counter-clockwise
+    return ""
+
+
+def display_size(meta: dict[str, Any], deg: int) -> tuple[int, int]:
+    """Frame shape after orientation — what the crop must be measured against."""
+    w, h = int(meta["width"]), int(meta["height"])
+    return (h, w) if deg in (90, 270) else (w, h)
 
 
 def safe_scale(cw: int, ch: int, width: int, height: int, max_deg: float) -> float:
@@ -200,13 +308,21 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     """
     hwaccel = hwaccel or config.HWACCEL
     meta = probe(src)
-    cw, ch, _x, _y = crop_box(meta["width"], meta["height"])
+    # Orientation first, and explicitly: everything below measures a crop in
+    # pixels, and a crop is meaningless until you know which way up the frame
+    # is. See the block above `upright_from_gravity`.
+    deg, why = orientation(meta, telemetry)
+    if "container says" in why:
+        print(f"    orientation: {deg}° from {why} — trusting the accelerometer")
+    orient_graph = _orient_graph(deg)
+    dw, dh = display_size(meta, deg)
+    cw, ch, _x, _y = crop_box(dw, dh)
     dur = max(t_out - t_in, 0.1)
 
     rot_graph, cmd_file, applied = "", None, 0.0
     if level:
         from . import level as lv
-        budget = rotation_budget(cw, ch, meta["width"], meta["height"])
+        budget = rotation_budget(cw, ch, dw, dh)
         cal = calibration_for(src, telemetry, preview)
 
         if level == "constant":
@@ -238,14 +354,15 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     # Shrink the crop to whatever the applied rotation demands. Doing this after
     # the angle is known, rather than reserving a fixed margin, means an
     # unlevelled clip loses nothing at all.
-    k = safe_scale(cw, ch, meta["width"], meta["height"], applied)
+    k = safe_scale(cw, ch, dw, dh, applied)
     cw2, ch2 = int(cw * k) & ~1, int(ch * k) & ~1
-    x2, y2 = (meta["width"] - cw2) // 2, (meta["height"] - ch2) // 2
+    x2, y2 = (dw - cw2) // 2, (dh - ch2) // 2
 
     # trim in the filter graph, not via -ss/-t: with more than one input those
     # bind to whichever input follows them, which once produced a reel twelve
     # times too long that reported success.
     graph = (f"[0:v]trim=start={t_in:.3f}:duration={dur:.3f},setpts=PTS-STARTPTS,"
+             f"{orient_graph}"
              f"{rot_graph}"
              f"crop={cw2}:{ch2}:{x2}:{y2},"
              f"scale={TARGET_W}:{TARGET_H}:flags=lanczos,"
@@ -259,6 +376,14 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     cmd = ["ffmpeg", "-y", "-v", "error",
            *proxy_mod._decode_args(hwaccel if hwaccel != "videotoolbox_vt"
                                    else "videotoolbox"),
+           # Autorotation is off because orientation is decided above, from
+           # gravity. Leaving it on means ffmpeg rotates by whatever the
+           # container claims while the crop below is measured against a frame
+           # shape chosen here — two answers, and no error when they differ.
+           # It is also version-dependent: 6.1 autorotates complex-filtergraph
+           # inputs, older builds do not, so the same command can produce two
+           # different reels from the same file on two machines.
+           "-noautorotate",
            "-i", src, "-filter_complex", graph, *maps, *_encoder(hwaccel),
            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
     r = subprocess.run(cmd, capture_output=True, text=True)
