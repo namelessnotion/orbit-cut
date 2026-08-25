@@ -62,9 +62,9 @@ AIR_FULL_S = 0.80
 # is what eventually replaces both these and SHARPNESS with fitted numbers.
 # `orbitcut fit` already knows how to check whether it can beat them.
 WEIGHTS = {
-    "speed": 0.1,
-    "turn": 0.3,
-    "rough": 0.6,
+    "speed": 0.0,
+    "turn": 0.15,
+    "rough": 0.85,
     # Descent is switched off, and the reason is measured rather than assumed.
     # Checked against a Trailforks profile of the trail actually ridden — 85% of
     # seconds within 20 m of it — GoPro altitude produced descents peaking at
@@ -125,7 +125,7 @@ GRID = np.linspace(0, 100, 101)
 # mean over weights of 0.2/0.2/0.6 is already close to "whatever rough says".
 # It is kept high because it still separates a specialised second from an
 # adequate one on the two minor features.
-SHARPNESS = 12
+SHARPNESS = 2
 
 # --- the part that is not obvious: sharpness cancels the weights -------------
 #
