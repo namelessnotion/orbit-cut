@@ -62,8 +62,8 @@ AIR_FULL_S = 0.80
 # is what eventually replaces both these and SHARPNESS with fitted numbers.
 # `orbitcut fit` already knows how to check whether it can beat them.
 WEIGHTS = {
-    "speed": 0.2,
-    "turn": 0.2,
+    "speed": 0.1,
+    "turn": 0.3,
     "rough": 0.6,
     # Descent is switched off, and the reason is measured rather than assumed.
     # Checked against a Trailforks profile of the trail actually ridden — 85% of
