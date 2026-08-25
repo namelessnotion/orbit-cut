@@ -947,6 +947,76 @@ def cmd_review(args) -> int:
     return 0
 
 
+def cmd_relink(args) -> int:
+    """Point the catalog back at the originals after they have moved.
+
+    `source_path` is where a file was when it was ingested, and for this library
+    that was `inbox/` — which the design describes as transient card offload.
+    The originals were moved somewhere else and nothing recorded where, because
+    the `archive` stage that exists to write `archived_path` was never built. So
+    the catalog knows everything about 97 rides except how to open one, and
+    `render` — which reads the original, never the proxy — has nothing to work
+    with.
+
+    The way back is the content hash. It is sampled rather than full-file, so
+    re-identifying a library costs three 8 MiB reads per file instead of
+    hundreds of gigabytes, and it is the same function ingest used, so a match
+    is exact rather than a guess about filenames. Files can have been renamed,
+    reorganised, or split across drives; only the bytes have to be the same.
+    """
+    conn = db.connect()
+    root = Path(args.path).expanduser()
+    if not root.exists():
+        print(f"not found: {root}")
+        return 1
+
+    want = {}
+    for a in db.assets(conn):
+        sp = a["source_path"]
+        if args.all or not sp or not Path(sp).exists():
+            want[a["content_hash"]] = a
+    if not want:
+        print("  every asset already points at a file that exists — nothing to do")
+        return 0
+
+    files = [p for p in (root.rglob("*") if root.is_dir() else [root])
+             if p.is_file() and p.suffix in config.VIDEO_SUFFIXES]
+    print(f"  {len(want)} asset(s) need a path; scanning {len(files)} file(s) under {root}\n")
+
+    found, unknown = {}, 0
+    for i, f in enumerate(sorted(files), 1):
+        print(f"\r  hashing {i}/{len(files)}  {f.name[:40]:<40}", end="", flush=True)
+        try:
+            h = hashing.content_hash(f)
+        except OSError as exc:
+            print(f"\r  ! {f.name}: {exc}")
+            continue
+        if h in want and h not in found:
+            found[h] = f
+        elif h not in want:
+            unknown += 1
+    print("\r" + " " * 70 + "\r", end="")
+
+    for h, f in sorted(found.items(), key=lambda kv: kv[1].name):
+        a = want[h]
+        print(f"  {a['filename']:<20} -> {f}")
+        if not args.dry_run:
+            db.upsert_asset(conn, h, source_path=str(f))
+    if not args.dry_run:
+        conn.commit()
+
+    still = len(want) - len(found)
+    print(f"\n  relinked {len(found)} of {len(want)}"
+          + (f", {still} still missing" if still else "")
+          + (f", {unknown} file(s) here are not in the catalog" if unknown else "")
+          + ("  (dry run — nothing written)" if args.dry_run else ""))
+    if still:
+        print("  The missing ones are on a drive this scan did not cover, or gone.")
+        print("  Nothing else in the catalog depends on them — proxies, telemetry")
+        print("  and every decision you made are keyed on the hash, not the path.")
+    return 0
+
+
 def cmd_label(args) -> int:
     """Record what was being shot: style and mount, by hand.
 
@@ -1745,6 +1815,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=0, help="default: pick a free one")
     p.add_argument("--no-open", action="store_true", help="do not open a browser")
     p.set_defaults(fn=cmd_review)
+
+    p = sub.add_parser("relink", help="find moved originals again by content hash")
+    p.add_argument("path", help="directory to scan, or one file")
+    p.add_argument("--all", action="store_true",
+                   help="re-check every asset, not only the ones whose path is broken")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_relink)
 
     p = sub.add_parser("label", help="record style and mount by hand")
     p.add_argument("asset", nargs="?", help="limit to one ride; default is all")
