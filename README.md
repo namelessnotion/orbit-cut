@@ -165,6 +165,298 @@ axis, obtained with a dot product that does not care which axis is which.
 
 ---
 
+## One second, all the way through
+
+Every number below is **GX010603 chapter 1, second 544** — a real second of a
+real ride, traced from accelerometer samples to the value `clips` ranks on.
+Nothing is rounded for the sake of the example: these are the figures on disk,
+expanded far enough to check on paper.
+
+Three stages, and they are separate files for a reason:
+
+| Stage       | Module         | Turns                | Into                     |
+| ----------- | -------------- | -------------------- | ------------------------ |
+| `score`     | `score.py`     | raw sensor samples   | physical units, per second |
+| `calibrate` | `calibrate.py` | physical units       | 0–1 against your library |
+| combine     | `calibrate.py` | 0–1 sub-scores       | one `composite`          |
+
+Physics is stored; opinion is applied at read time. That is why changing a
+weight costs nothing to re-apply, and why the same second scores differently
+after you ingest more footage.
+
+### 0. What the sensors recorded
+
+`imu_raw.parquet` holds 154,756 rows spanning 768.768 s, so
+
+$$f_s = \frac{154756}{768.768 - 0} = 201.303904\ \text{Hz}$$
+
+Second 544 contains 201 of those. The first one is
+
+$$t = 544.003856 \qquad
+\mathbf{a} = (-7.124700,\ -2.678657,\ 17.302158)\ \text{m/s}^2 \qquad
+\boldsymbol{\omega} = (-0.857295,\ 2.616613,\ 0.532481)\ \text{rad/s}$$
+
+Gravity is a separate stream at 10 Hz, so it brackets that instant:
+
+$$\mathbf{g}(544.000) = (0.292110,\ -0.693616,\ 0.657944) \qquad
+\mathbf{g}(544.100) = (0.276313,\ -0.634871,\ 0.721163)$$
+
+Those subscripts are positional, not semantic. Nothing below depends on which
+axis is which — see *Axis order never comes into it* above.
+
+### 1. `score` → `rough`
+
+Magnitude, remove the ride's mean, keep the 5–40 Hz band, take the RMS over the
+second.
+
+$$\lVert\mathbf{a}\rVert
+= \sqrt{(-7.124700)^2 + (-2.678657)^2 + (17.302158)^2}
+= \sqrt{50.761354 + 7.175204 + 299.364681}
+= \sqrt{357.301238}
+= 18.902414$$
+
+Centre it on the ride's own mean magnitude, $\bar{m} = 10.828223$ over all
+154,756 samples:
+
+$$18.902414 - 10.828223 = 8.074191$$
+
+Then a 4th-order Butterworth band-pass, 5–40 Hz at $f_s = 201.303904$, run
+forward and backward (`sosfiltfilt` — zero phase, effectively 8th order). That
+is a recursion over the whole ride rather than something to do by hand; what
+matters is what it keeps. Below 5 Hz is your body and the bike moving, above
+40 Hz is sensor noise, and between them is the trail hitting the wheels. For
+our sample it returns
+
+$$b_{109511} = 2.425703$$
+
+RMS across the 201 samples whose timestamps fall in $[544, 545)$:
+
+$$\text{rough}
+= \sqrt{\frac{1}{201}\sum_{i} b_i^{2}}
+= \sqrt{\frac{1919.558807}{201}}
+= \sqrt{9.550044}
+= 3.090315\ \text{m/s}^2$$
+
+### 1b. `score` → `yaw rate`
+
+Turning is rotation *about gravity*. Normalise gravity, interpolate it onto the
+gyro's own clock, and project — a dot product, which is why axis order never
+enters into it.
+
+$$\alpha = \frac{544.003856 - 544.000}{544.100 - 544.000} = 0.03856
+\qquad\Longrightarrow\qquad
+\hat{\mathbf{g}} = (0.291641,\ -0.691682,\ 0.660698),\quad \lVert\hat{\mathbf{g}}\rVert = 1$$
+
+$$\begin{aligned}
+\omega_\parallel = \boldsymbol{\omega}\cdot\hat{\mathbf{g}}
+&= (-0.857295)(0.291641) + (2.616613)(-0.691682) + (0.532481)(0.660698)\\
+&= -0.250022 - 1.809864 + 0.351809\\
+&= -1.708077\ \text{rad/s}
+\end{aligned}$$
+
+Now the part that had to be fixed once: **low-pass first, rectify second.** A
+trail corner takes seconds, so nothing about cornering lives above 1 Hz. A
+2nd-order Butterworth low-pass at 1 Hz, again zero-phase, gives
+
+$$\tilde{\omega}_{109511} = -0.012672\ \text{rad/s}$$
+
+and only then take the absolute value and average over the second:
+
+$$\text{yaw rate}
+= \frac{1}{201}\sum_i \lvert\tilde{\omega}_i\rvert
+= \frac{13.474394}{201}
+= 0.067037\ \text{rad/s}
+= 3.84\ \text{deg/s}$$
+
+Reverse those two steps and the same second reads $0.955712$ rad/s — 54.76 deg/s,
+**14.3× larger**. Rectifying first turns zero-mean trail chatter into a positive
+floor, and the floor scales with roughness, so the feature becomes a vibration
+meter wearing a cornering label.
+
+0603 never locked GPS, so `speed_ms`, `lat_accel` and `grade` are all NaN, and
+`detect_air` found no freefall in this second. The stored row is
+
+$$t = 544,\quad \text{rough} = 3.090315,\quad \text{yaw rate} = 0.067037,\quad \text{air} = 0$$
+
+### 2. `calibrate` → the breakpoints
+
+Pool every finite value of one feature across all 97 files, sort it, and store
+101 percentiles — p0 through p100 in 1% steps. For $n$ sorted values $v$:
+
+$$h = (n-1)\frac{q}{100}, \qquad
+\text{break}_q = v_{\lfloor h\rfloor}\,(1-g) + v_{\lceil h\rceil}\,g,
+\qquad g = h - \lfloor h\rfloor$$
+
+`rough` has $n = 49{,}244$ finite samples. The two breaks this second lands
+between:
+
+$$\begin{aligned}
+p_{98}:\quad h &= 49243 \times 0.98 = 48258.14\\
+&= v_{48258}(0.86) + v_{48259}(0.14)\\
+&= 2.652335(0.86) + 2.652441(0.14) = 2.65234952\\[4pt]
+p_{99}:\quad h &= 49243 \times 0.99 = 48750.57\\
+&= 3.203956(0.43) + 3.205553(0.57) = 3.20486627
+\end{aligned}$$
+
+`yaw_rate` has $n = 49{,}247$:
+
+$$\begin{aligned}
+p_{35}:\quad h &= 49246 \times 0.35 = 17236.10\\
+&= 0.06555026(0.90) + 0.06555113(0.10) = 0.06555035\\[4pt]
+p_{36}:\quad h &= 49246 \times 0.36 = 17728.56\\
+&= 0.06704402(0.44) + 0.06704591(0.56) = 0.06704508
+\end{aligned}$$
+
+Note that $p_0$ is the minimum sample and $p_{100}$ the maximum, so nothing in
+the library can score above 1.0 — the single roughest second you have ever
+recorded *defines* it. And the bins hold equal **counts**, not equal ranges:
+each holds about 492 seconds, so where the data is dense the breaks are microns
+apart (p35 to p36 spans 0.0000147 rad/s) while p99 to p100 spans `rough` from
+3.20 to 8.35.
+
+### 3. `calibrate` → sub-scores
+
+Find which pair of breaks the value falls between, and interpolate:
+
+$$s = \frac{1}{100}\left(q + \frac{x - \text{break}_q}{\text{break}_{q+1} - \text{break}_q}\right)$$
+
+$$s_{\text{rough}}
+= \frac{1}{100}\left(98 + \frac{3.090315 - 2.65234952}{3.20486627 - 2.65234952}\right)
+= \frac{1}{100}\left(98 + \frac{0.43796548}{0.55251675}\right)
+= \frac{98 + 0.792674}{100}
+= 0.987927$$
+
+$$s_{\text{turn}}
+= \frac{1}{100}\left(35 + \frac{0.067037 - 0.06555035}{0.06704508 - 0.06555035}\right)
+= \frac{1}{100}\left(35 + \frac{0.00148665}{0.00149473}\right)
+= \frac{35 + 0.994594}{100}
+= 0.359946$$
+
+So: the top 1.2% of every second you own for roughness, and the bottom 36% for
+cornering. `s_turn` would come from `lat_accel` on a ride with GPS; without it,
+bare turn rate fills the same slot.
+
+### 4. combine → the power mean
+
+$$L = \left(\frac{\sum_k w_k\, s_k^{\,p}}{\sum_k w_k}\right)^{1/p}$$
+
+with `speed 0.0 / turn 0.15 / rough 0.85` and $p = 2$. A feature weighted zero
+is *absent*, not present-and-ignored, so speed leaves both sums — which is also
+what keeps the availability bucket in the next step honest.
+
+$$\begin{aligned}
+\text{turn:}\quad 0.359946^{2} &= 0.129561 &&\times\ 0.15 &&= 0.019434\\
+\text{rough:}\quad 0.987927^{2} &= 0.975999 &&\times\ 0.85 &&= 0.829599\\
+& &&\phantom{\times\ 0.85}\ \Sigma &&= 0.849033
+\end{aligned}$$
+
+$$L = \left(\frac{0.849033}{0.15 + 0.85}\right)^{1/2} = \sqrt{0.849033} = 0.921430$$
+
+$p = 1$ would be the ordinary weighted mean and $p \to \infty$ the maximum.
+Above 1 it leans toward the best feature in the second, which is deliberate: a
+highlight is a moment that is outstanding at one thing, not adequate at
+everything. Averaging punishes exactly the specialisation that makes footage
+worth watching.
+
+### 5. combine → rank the level a second time
+
+Which features were present is a bitmask over `(speed, turn, rough, descent)`:
+
+$$k = \underbrace{0}_{\text{speed}} + \underbrace{2}_{\text{turn}} + \underbrace{4}_{\text{rough}} + \underbrace{0}_{\text{descent}} = 6$$
+
+Bucket 6 is `turn+rough`, $n = 49{,}244$ — essentially this whole library. Its
+breaks are built with the identical percentile formula, applied to the levels
+rather than to the raw features:
+
+$$\text{level}
+= \frac{1}{100}\left(95 + \frac{0.92142977 - 0.91280474}{0.92283727 - 0.91280474}\right)
+= \frac{1}{100}\left(95 + \frac{0.00862503}{0.01003253}\right)
+= \frac{95 + 0.859706}{100}
+= 0.958597$$
+
+Ranking twice is not redundant. A mean of two terms is more variable than a mean
+of four, so it reaches high values more often *even when every underlying
+feature is identically distributed* — in a simulation with no real difference
+between the rides, the two-feature rides took all six of the top six places.
+Bucketing asks the answerable question instead: how good is this second for
+what we could measure here.
+
+### 6. combine → smooth, then fold in airtime
+
+A clip is seconds long, so single-second wobble is not what anyone watches.
+Three-second centred mean, using the neighbours' levels:
+
+$$\text{level}_s(544) = \frac{0.990415 + 0.958597 + 0.998200}{3} = 0.982404$$
+
+Airtime joins by probabilistic OR rather than by averaging, because a rare event
+and a sustained level are different kinds of evidence:
+
+$$\text{composite} = 1 - \bigl(1 - \text{level}_s\bigr)\bigl(1 - 0.75\,s_{\text{air}}\bigr)$$
+
+$$= 1 - (1 - 0.982404)(1 - 0.75 \times 0) = \mathbf{0.982404}$$
+
+Had that second carried 0.40 s of freefall, $s_{\text{air}} = 0.40/0.80 = 0.5$
+and it would read
+
+$$1 - (0.017596)(1 - 0.375) = 0.989003$$
+
+A jump can only lift a second, never dilute it. Averaging airtime in was the
+first attempt and it was wrong: a 0.71 s jump is one second in ninety, and the
+three-second mean halved it out of contention.
+
+### The whole second on one line
+
+| Quantity     | Value      | Where it came from                             |
+| ------------ | ---------- | ---------------------------------------------- |
+| `rough`      | 3.090315   | RMS of 201 band-passed accelerometer samples   |
+| `yaw_rate`   | 0.067037   | mean \|GYRO · ĝ\| after a 1 Hz low-pass        |
+| `s_rough`    | 0.987927   | 98.79th percentile of 49,244 seconds           |
+| `s_turn`     | 0.359946   | 35.99th percentile of 49,247 seconds           |
+| `level_raw`  | 0.921430   | power mean, p = 2, weights 0.15 / 0.85         |
+| `level`      | 0.958597   | 95.86th percentile of bucket `turn+rough`      |
+| `composite`  | 0.982404   | 3 s mean, no airtime to fold in                |
+
+### What the arithmetic shows that the code does not
+
+Look again at step 4. `turn` carries 15% of the weight and contributes
+
+$$\frac{0.019434}{0.849033} = 2.29\%$$
+
+of the sum. That is the weight multiplying a sub-score that has already been
+squared. Now the same second under the settings this library was originally
+tuned to — `0.1 / 0.3 / 0.6` at $p = 12$:
+
+$$0.359946^{12} = 4.73\times10^{-6}
+\qquad\Longrightarrow\qquad
+0.3 \times 4.73\times10^{-6} = 1.42\times10^{-6}$$
+
+$$\frac{1.42\times10^{-6}}{0.518620} = 0.00027\%$$
+
+Turn was weighted **twice** as heavily and bought four ten-thousandths of one
+percent of the result. That is the whole finding recorded under `SHARPNESS` in
+`calibrate.py`, in one line of arithmetic: a power mean at high $p$ is nearly a
+maximum, and a maximum has no use for weights. Raising `rough` from 0.2 to 0.6
+to 0.8 never felt like it did anything because past about $p = 8$ the weighting
+is close to inert for exactly the specialised seconds a highlight is made of.
+
+Two knobs, not independent:
+
+| Weights            |  $p$ | pure rough | pure turn |   gap |
+| ------------------ | ---: | ---------: | --------: | ----: |
+| 0.1 / 0.3 / 0.6    |   12 |      0.958 |     0.905 | 0.054 |
+| 0.1 / 0.3 / 0.6    |    2 |      0.775 |     0.548 | 0.227 |
+| 0 / 0.15 / 0.85    |   12 |      0.987 |     0.854 | 0.133 |
+| 0 / 0.15 / 0.85    |    2 |      0.922 |     0.387 | 0.535 |
+| 0 / 0 / 1.00       |  any |      1.000 |     0.000 | 1.000 |
+
+To genuinely de-emphasise a feature at high sharpness you must set it to zero;
+small-but-nonzero does almost nothing. To keep it in play *and* de-emphasise it,
+lower $p$ — weights only behave the way they read at low sharpness. And a single
+weight of 1.00 turns sharpness off entirely, because a power mean of one term is
+that term.
+
+---
+
 ## Things that were measured, and cost something to learn
 
 The full record is in [`docs/architecture.md`](docs/architecture.md). These are
