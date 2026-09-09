@@ -155,3 +155,100 @@ def render(proxy_path: str, scored: pd.DataFrame, events: pd.DataFrame | None,
     if r.returncode != 0:
         raise RuntimeError(f"overlay render failed: {r.stderr.strip()[:400]}")
     return str(out)
+
+
+# --------------------------------------------------------------- subject framing
+def render_track(row, track: "pd.DataFrame", t_in: float, t_out: float,
+                 out: Path | None = None, step_s: float = 0.05) -> str:
+    """Watch the boxes and the solved crop window, drawn on the proxy.
+
+    This exists to be looked at *before* `render.py` learns to pan, and that
+    ordering is the point: if the detector cannot find Orbit, or the crop path
+    lurches, one pass over a 540p proxy says so — where finding the same thing
+    from a finished Reel costs a full-resolution decode per attempt and tells
+    you less, because the crop has already thrown away everything outside it.
+
+    Three boxes, and the third is the one worth watching. The detection is where
+    the model says he is. The crop window is what the Reel would keep. The band
+    is the dead zone around the crop's centre: while he is inside it the camera
+    is entitled to sit perfectly still, so a crop that moves anyway, or one that
+    sits still while he is outside it, is visible as such rather than inferred
+    from a number.
+
+    Everything is driven from one `sendcmd` script, because `drawbox`'s x, y, w,
+    h, colour and thickness all carry ffmpeg's runtime-command flag. So this is
+    still one pass and one encode, whatever the path does.
+    """
+    from . import reframe as rf, render as rn, track as tk
+
+    proxy = row["proxy_path"]
+    pw, ph = _video_size(proxy)
+    delta, _ = tk.orientation_delta(row)
+
+    meta = rn.probe(row["source_path"]) if row["source_path"] else None
+    deg = (int(row["rotation"] or 0) + delta) % 360
+    fw, fh = (rn.display_size(meta, deg) if meta
+              else (int(row["width"]), int(row["height"])))
+    cw, ch, _, _ = rn.crop_box(fw, fh)
+
+    sl = track[(track["t"] >= t_in - rf.PAD_S) & (track["t"] <= t_out + rf.PAD_S)]
+    grid, x, report = rf.crop_path(sl["t"].to_numpy(), sl["u"].to_numpy(),
+                                   sl["v"].to_numpy(), t_in, t_out, fw, fh, cw)
+
+    # Proxy pixels, not source pixels. The two differ by one scale factor and
+    # nothing else, because the crop is full height in every shape here.
+    k = pw / fw
+    band_px = rf.DEAD_ZONE * cw * k
+
+    steps = np.arange(0.0, max(t_out - t_in, step_s), step_s)
+    have = sl.dropna(subset=["u"])
+    lines = []
+    for g in steps:
+        t = t_in + g
+        cx = float(np.interp(t, grid, x)) * k          # crop left, proxy px
+        cwp = cw * k
+        # The detection, when there is one close enough in time to be this
+        # frame's rather than a neighbour's.
+        near = have.iloc[(have["t"] - t).abs().to_numpy().argmin()] if len(have) else None
+        fresh = near is not None and abs(float(near["t"]) - t) <= 1.0 / 5.0
+        if fresh:
+            bx, by = float(near["x0"]) * pw, float(near["y0"]) * ph
+            bw, bh = (float(near["x1"]) - float(near["x0"])) * pw, \
+                     (float(near["y1"]) - float(near["y0"])) * ph
+        else:
+            bx = by = bw = bh = 0                       # w=0 draws nothing
+        # One interval per step. Within an interval commands are separated by
+        # commas and the interval itself is closed by a semicolon — a semicolon
+        # between commands instead reads as "next interval starts at
+        # `drawbox@dog`", which ffmpeg reports as an invalid start time.
+        cmds = [f"drawbox@dog x {bx:.0f}", f"drawbox@dog y {by:.0f}",
+                f"drawbox@dog w {bw:.0f}", f"drawbox@dog h {bh:.0f}",
+                f"drawbox@crop x {cx:.0f}", f"drawbox@crop w {cwp:.0f}",
+                f"drawbox@band x {cx + cwp / 2 - band_px:.0f}",
+                f"drawbox@band w {2 * band_px:.0f}",
+                # Thick while tracking, thin while holding through a gap, so a
+                # dropout is visible without reading a log.
+                f"drawbox@crop t {4 if fresh else 2}"]
+        lines.append(f"{g:.3f} " + ", ".join(cmds) + ";\n")
+
+    # Named for the clip, not the ride: two clips from one ride would otherwise
+    # write to the same file and the second would silently replace the first.
+    out = (Path(out) if out else config.derived_dir(row["content_hash"])
+           / f"track_{int(t_in):04d}_{int(t_out):04d}.mp4")
+    cmds = out.with_suffix(".cmds")
+    cmds.write_text("".join(lines))
+    graph = (f"[0:v]trim=start={t_in:.3f}:duration={max(t_out - t_in, 0.1):.3f},"
+             f"setpts=PTS-STARTPTS,{rn._orient_graph(delta)}"
+             f"sendcmd=f='{cmds.as_posix()}',"
+             f"drawbox@dog=x=0:y=0:w=0:h=0:color={MOSS}@0.9:t=3,"
+             f"drawbox@crop=x=0:y=0:w=0:h={ph}:color={COMPOSITE}@0.8:t=4,"
+             f"drawbox@band=x=0:y=0:w=0:h={ph}:color={MUTED}@0.35:t=2[v]")
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", proxy,
+           "-filter_complex", graph, "-map", "[v]",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+           "-movflags", "+faststart", str(out)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    cmds.unlink(missing_ok=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"track overlay failed: {r.stderr.strip()[:400]}")
+    return str(out), report

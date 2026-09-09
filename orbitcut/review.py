@@ -4,13 +4,9 @@ A local server on the stdlib, deliberately. The whole app is one page and three
 endpoints, and adding a framework would mean another dependency in a project
 where three undeclared ones have already caused a crash.
 
-Two things here are less obvious than they look.
-
-**HTTP range requests are not optional.** `SimpleHTTPRequestHandler` answers
-every GET with 200 and the whole file, and a browser given a 200 for a video
-cannot seek — Safari will not even start playing. Every clip in this UI is a
-seek into the middle of a ten-minute proxy, so `_serve_range` implements 206
-properly, including the zero-length probe (`bytes=0-1`) browsers open with.
+Serving video to a browser has one non-obvious requirement — range requests,
+without which nothing can seek — and `webui.py` carries it, because `cut` needs
+exactly the same thing.
 
 **The decision is the product.** Approvals and rejections are the one thing in
 this pipeline that cannot be recomputed: proxies, scores and candidates can all
@@ -23,18 +19,13 @@ says which way the selector is biased, which a bare approve/reject cannot.
 from __future__ import annotations
 
 import json
-import re
-import socket
-import threading
-import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from . import db
+from . import db, webui
 
 REASONS = ["too shaky", "bad light", "boring", "already have one like it",
            "wrong in/out"]
-CHUNK = 512 * 1024
 
 
 def _rows(conn, ride: str | None) -> list[dict]:
@@ -330,59 +321,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, "application/json", json.dumps(out).encode())
 
     def _send(self, code: int, ctype: str, body: bytes):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        webui.send(self, code, ctype, body)
 
     def _serve_range(self, path: Path):
-        """206 Partial Content, properly.
-
-        Without this a browser cannot seek, and seeking is the entire job here:
-        every clip is a jump into the middle of a ten-minute file. Safari will
-        not play a video served as a plain 200 at all, and it opens with a
-        `bytes=0-1` probe purely to find out whether ranges are supported — so
-        that degenerate two-byte request has to be answered correctly.
-        """
-        size = path.stat().st_size
-        rng = self.headers.get("Range", "")
-        m = re.match(r"bytes=(\d*)-(\d*)", rng)
-        if not m or not rng:
-            start, end = 0, size - 1
-            code = 200
-        else:
-            s, e = m.group(1), m.group(2)
-            if s == "":                       # suffix form: last N bytes
-                length = min(int(e or 0), size)
-                start, end = size - length, size - 1
-            else:
-                start = int(s)
-                end = int(e) if e else min(start + CHUNK - 1, size - 1)
-            start = max(0, min(start, size - 1))
-            end = max(start, min(end, size - 1))
-            code = 206
-
-        length = end - start + 1
-        self.send_response(code)
-        self.send_header("Content-Type", "video/mp4")
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Length", str(length))
-        if code == 206:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.end_headers()
-        with path.open("rb") as f:
-            f.seek(start)
-            left = length
-            while left > 0:
-                chunk = f.read(min(CHUNK, left))
-                if not chunk:
-                    break
-                try:
-                    self.wfile.write(chunk)
-                except (BrokenPipeError, ConnectionResetError):
-                    return          # the browser seeked away; not an error
-                left -= len(chunk)
+        webui.serve_range(self, path)
 
 
 def serve(conn, ride: str | None, port: int = 0, open_browser: bool = True):
@@ -394,21 +336,8 @@ def serve(conn, ride: str | None, port: int = 0, open_browser: bool = True):
     Handler.proxies = {a["content_hash"]: a["proxy_path"]
                        for a in db.assets(conn) if a["proxy_path"]}
 
-    # Bind to loopback only: this serves your footage and takes decisions, and
-    # neither belongs on the network.
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    server.daemon_threads = True
-    url = f"http://127.0.0.1:{server.server_address[1]}/"
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    if open_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+    server, url = webui.start(Handler, port, open_browser)
     return server, url, len(rows)
 
 
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+free_port = webui.free_port

@@ -138,6 +138,17 @@ def main() -> int:
                    rn.orientation({"rotation": 90}, None) == (90, "container"),
                    "90° from container")
 
+    # The decoder's own behaviour, which is the half of this that was assumed
+    # rather than checked and cost 77 files. `-noautorotate` does nothing at all
+    # on ffmpeg 9.0.1: with it believed, `clip` applied its own 180 on top of
+    # ffmpeg's and every chest-mounted ride came out upside down.
+    flags, coded = rn.decode_flags()
+    fails += check("the decoder can be made to hand over the coded frame",
+                   coded, " ".join(flags) or "no flags")
+    if not coded:
+        print("      (a build that cannot: files declaring a rotation are "
+              "refused rather than guessed at — ffmpeg 6.0+ fixes it)")
+
     print(f"\n  {'all checks passed' if not fails else str(fails) + ' FAILURE(S)'}")
     return 1 if fails else 0
 

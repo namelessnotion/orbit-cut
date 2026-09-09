@@ -9,25 +9,41 @@ exist so that scoring and review are cheap; a Reel made from one would be a
 540p source upscaled to 1080 wide. The proxy's only job here is to have told you
 which seconds are worth the full decode.
 
-**The crop is centred.** Subject-aware framing needs the dog detector, which is
-phase 4. A centre crop is the honest version of "we do not know where the
-subject is yet", and it is what the 8:7 capture setting was chosen for — the
-sensor is tall so that the sides can go.
+**The crop is centred unless you ask otherwise.** `--frame subject` pans it to
+follow Orbit, from the track `orbitcut track` writes; without it, or on a clip
+the detector could not follow, the crop sits in the middle as it always has.
+Centre remains the default because a change to how every existing clip renders
+should be asked for rather than arrived at.
+
+Measured over ride 0598's six approved clips: the median frame barely moves,
+because a rider following a dog already points at him — but the 95th percentile
+of how far Orbit sits from the crop's centre halves, 0.52 to 0.26 crop widths,
+and the share of sightings where he is outside the crop altogether falls from
+7% to 1%. This does not improve the typical second. It rescues the ones where a
+centre crop had lost him.
 
 It can be rotated, though, because phase 0 measured roll suppression at +0.11
 and so the mount's tilt is still in the pixels. `--level` picks what to do about
 it and `level.py` measures it; the crop then shrinks by exactly as much as the
 angle demands, which is why an unlevelled clip loses nothing at all.
 
-**Which way is up comes from gravity, not from the container.** ffmpeg's
-autorotation is off here and the rotation is applied explicitly, because a crop
-measured in pixels is meaningless until the frame shape is settled and the
-container is not a reliable source for it — see `upright_from_gravity`.
+**Which way is up comes from gravity, not from the container.** The rotation is
+applied explicitly, because a crop measured in pixels is meaningless until the
+frame shape is settled and the container is not a reliable source for it — see
+`upright_from_gravity`. Getting the decoder to hand over the unrotated frame so
+that can happen is its own problem, and the flag for it silently stopped
+working: see `decode_flags`.
 
-Both source shapes work but not equally:
+The three shapes in this library, and what each leaves to pan with:
 
-    8:7  3956x3460  ->  crop 1946x3460   2010 px of pan left over
-    16:9 3840x2160  ->  crop 1214x2160   2626 px of pan, far less trail ahead
+    5312x2988  52 files  ->  crop 1680x2988   3632 px spare
+    3840x3360  37 files  ->  crop 1890x3360   1950 px spare
+    5312x4648   8 files  ->  crop 2614x4648   2698 px spare
+
+Every one crops to **full height**, so the crop is a vertical slice and the only
+framing decision there is to make is horizontal. That is what `--frame subject`
+spends: `reframe.py` decides where the slice sits, this drives it through
+`crop`'s `x` with `sendcmd`, and vertically there is never a choice.
 
 The 16:9 rides still clear 1080 wide, so they render — but a 9:16 slice of a
 wide frame shows much less of what is coming, and most of the approved clips are
@@ -41,8 +57,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -53,6 +71,71 @@ MAX_ROTATE_DEG = 25.0
 MAX_REEL_S = 175.0          # a little under three minutes, for safety
 CRF = 20                    # visually lossless enough at 1080; Instagram re-encodes
 AUDIO_KBPS = "128k"
+MAX_FPS = 60.0              # Instagram's ceiling
+STOP_POLL_S = 0.25          # how fast a cancel reaches the encoder
+
+
+class Cancelled(RuntimeError):
+    """Raised when a render was stopped on purpose, rather than having failed."""
+
+
+def _run(cmd: list[str], progress: Callable[[float], None] | None = None,
+         stop: Callable[[], bool] | None = None):
+    """Run ffmpeg, reporting how many seconds of output exist so far.
+
+    `subprocess.run` is enough when nobody is watching, and that is still the
+    path taken when neither hook is given. But a 30-second clip cut from a 5.3K
+    HEVC original is most of a minute of decode, and a queue of six is most of
+    ten — a progress bar that only moves when a clip finishes is not one. So
+    `-progress pipe:1` reports `out_time_us` every few frames.
+
+    stderr is drained on a thread rather than read after the fact: ffmpeg blocks
+    once a full pipe has nowhere to go, and the error text is what the fallback
+    ladder below prints when hardware encoding refuses a file.
+
+    `stop` is polled on its own thread rather than checked when a progress line
+    arrives, and that is the whole point of it. The trim happens inside the
+    filter graph (see `clip`), so ffmpeg decodes from the start of the file to
+    the in-point before it emits a single output frame — 757 s into a ride, that
+    is two minutes during which `-progress` says nothing at all. Cancelling
+    against progress lines therefore did nothing during exactly the phase you
+    would want to cancel in. A watchdog does not care.
+    """
+    if progress is None and stop is None:
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    proc = subprocess.Popen([cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    err: list[str] = []
+    threads = [threading.Thread(target=lambda: err.extend(proc.stderr or []),
+                                daemon=True)]
+    killed = threading.Event()
+
+    if stop is not None:
+        def watch():
+            while proc.poll() is None:
+                if stop():
+                    killed.set()
+                    proc.kill()
+                    return
+                time.sleep(STOP_POLL_S)
+        threads.append(threading.Thread(target=watch, daemon=True))
+
+    for t in threads:
+        t.start()
+    for line in proc.stdout or []:
+        # out_time_ms is misnamed and also carries microseconds; read whichever
+        # this build prints.
+        if progress and line.startswith(("out_time_us=", "out_time_ms=")):
+            raw = line.split("=", 1)[1].strip()
+            if raw.isdigit():
+                progress(int(raw) / 1e6)
+    proc.wait()
+    for t in threads:
+        t.join(timeout=2)
+    if killed.is_set():
+        raise Cancelled(" ".join(cmd[-1:]))
+    return subprocess.CompletedProcess(cmd, proc.returncode, "", "".join(err))
 
 
 def probe(path: str) -> dict[str, Any]:
@@ -110,6 +193,105 @@ def probe(path: str) -> dict[str, Any]:
 # recorded 200 times a second for the whole ride, and it cannot be set wrong by
 # a sensor glitch at the moment the record button is pressed.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# What the decoder actually hands us
+#
+# `-noautorotate` was supposed to settle this: ask for the coded frame, apply
+# the rotation ourselves, and stop the output depending on the machine. On
+# ffmpeg 9.0.1 that flag does nothing whatsoever. Measured on a 640x360 clip
+# whose coded frame is black at the top and white at the bottom, carrying a 180
+# display matrix — upright means the white ends up at the top:
+#
+#     no flags             white at top      matrix applied
+#     -noautorotate        white at top      matrix applied
+#     -autorotate 0        white at top      matrix applied
+#     -display_rotation 0  white at BOTTOM   the coded frame, as asked for
+#
+# Both filter forms behave identically; it is not a complex-filtergraph quirk.
+# With the flag believed, `clip` applied its own 180 on top of ffmpeg's, and
+# every file carrying a 180 matrix rendered upside down — 77 of the 97 here,
+# which is every chest-mounted ride. The 20 helmet files have no matrix and
+# were unaffected, so it looked like it worked.
+#
+# The lesson is not "use the other flag". It is that a flag was trusted and
+# never checked. So this measures: plant a known frame under a known matrix,
+# decode it back with the flags we are about to use for real, and look. Once
+# per process, on a 64x64 clip.
+# ---------------------------------------------------------------------------
+
+# Preferred first. `-display_rotation` arrived in ffmpeg 6.0, so an older build
+# falls through to the second and is compensated for instead of failing.
+_ROTATION_FLAGS = (["-display_rotation", "0", "-noautorotate"], ["-noautorotate"])
+_PROBE = 64
+_DECODE: tuple[list[str], bool] | None = None
+
+
+def decode_flags() -> tuple[list[str], bool]:
+    """(input flags to pass, whether they actually get us the coded frame).
+
+    A False second element means this build applies the display matrix whatever
+    it is told, and `clip` then refuses any file that declares a rotation rather
+    than correcting for it. Correcting was tried and is unsound: it means
+    subtracting the container's number from the gravity answer, and GX010600
+    gives three different numbers about itself — display matrix 90, legacy tag
+    270, 180 recorded at ingest. Compensation renders it upside down, measured.
+    A file declaring 0 has nothing to be applied and renders normally.
+    """
+    global _DECODE
+    if _DECODE is None:
+        _DECODE = _measure_decode()
+    return _DECODE
+
+
+def _measure_decode() -> tuple[list[str], bool]:
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="orbitcut_rot_") as td:
+        d = Path(td)
+        plain, stamped = d / "plain.mp4", d / "stamped.mp4"
+        made = subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+             "-i", f"color=c=black:s={_PROBE}x{_PROBE}:d=1:r=5",
+             "-vf", f"drawbox=x=0:y=0:w={_PROBE}:h={_PROBE // 2}:color=white:t=fill",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(plain)],
+            capture_output=True)
+        stamp = subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-display_rotation", "180",
+             "-i", str(plain), "-c", "copy", str(stamped)], capture_output=True)
+        if made.returncode or stamp.returncode:
+            # Cannot plant the question, so cannot answer it. Assume the flag
+            # works, which is what every build before 7.x did; a file with a
+            # matrix then still gets the check below rather than a silent flip.
+            print("    ! could not check how ffmpeg handles rotation — "
+                  "assuming -noautorotate is honoured")
+            return list(_ROTATION_FLAGS[-1]), True
+
+        for flags in _ROTATION_FLAGS:
+            white_on_top = _probe_upright(stamped, flags)
+            if white_on_top is None:
+                continue            # this build rejects the flags; try the next
+            if white_on_top:
+                return list(flags), True       # the coded frame, untouched
+        return list(_ROTATION_FLAGS[-1]), False
+
+
+def _probe_upright(path: Path, flags: list[str]) -> bool | None:
+    """Is the planted white band still at the top when this comes back?
+
+    The planted file is white on top *in the coded frame* and carries a 180
+    matrix. White still on top means nothing was applied.
+    """
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", *flags, "-i", str(path),
+         "-filter_complex", "[0:v]null[v]", "-map", "[v]", "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True)
+    if r.returncode != 0 or len(r.stdout) < _PROBE * _PROBE:
+        return None
+    img = np.frombuffer(r.stdout[:_PROBE * _PROBE], dtype=np.uint8)
+    img = img.reshape(_PROBE, _PROBE)
+    return bool(img[:_PROBE // 4].mean() > img[-_PROBE // 4:].mean())
+
 
 # Below this the camera was pointing near-straight up or down and none of the
 # lateral axes carry a usable direction.
@@ -295,9 +477,79 @@ def calibration_for(src: str, telemetry: str | None,
     return cal
 
 
+MIN_HITS = 0.15
+# Share of the sampled frames in a clip that need a box before subject framing
+# is worth doing at all. Below it the path is mostly the hold-and-ease policy
+# rather than the dog, and a centre crop is the more honest answer. Stock COCO
+# RF-DETR runs 0.20-0.35 on this library, so this is a floor for the bad clips,
+# not a target — the fine-tune is what moves the number itself.
+
+
+def _pan(track: str | None, t_in: float, t_out: float, dw: int, dh: int,
+         cw2: int, out: Path, applied_deg: float,
+         fallback: int) -> tuple[int, str, Path | None]:
+    """(crop x at t=0, the sendcmd fragment, the script to delete afterwards).
+
+    Falls back to the centred `fallback` and an empty fragment whenever the
+    track cannot carry the clip, saying which of the reasons it was.
+
+    The starting x is the *solved* value rather than the centre, deliberately.
+    The first command does fire on the first frame, but seeding the filter with
+    the answer means that a sendcmd which somehow did not run shows up as a
+    crop sitting at a constant offset — visible and diagnosable — instead of a
+    single-frame jump that reads as a stutter.
+    """
+    import pandas as pd
+
+    from . import reframe as rf
+
+    why = None
+    if not track or not Path(track).exists():
+        why = "no track for this ride — run `orbitcut track`"
+    else:
+        df = pd.read_parquet(track)
+        # Padded, because the solver wants context either side of the clip and
+        # discards it; unpadded, the first second of every clip is a hold it
+        # did not earn.
+        sl = df[(df["t"] >= t_in - rf.PAD_S) & (df["t"] <= t_out + rf.PAD_S)]
+        inside = df[(df["t"] >= t_in) & (df["t"] <= t_out)]
+        if not len(inside):
+            why = "the track does not cover this clip"
+        elif inside["u"].notna().mean() < MIN_HITS:
+            why = (f"the detector found Orbit in only "
+                   f"{inside['u'].notna().mean():.0%} of this clip")
+
+    if why:
+        print(f"    framing: centred — {why}")
+        return fallback, "", None
+
+    grid, x, report = rf.crop_path(
+        sl["t"].to_numpy(), sl["u"].to_numpy(), sl["v"].to_numpy(),
+        t_in, t_out, dw, dh, cw2, applied_deg=applied_deg)
+    if not len(x):
+        print("    framing: centred — the crop path came out empty")
+        return fallback, "", None
+
+    script = rf.sendcmd(grid, x, t_in, t_out, dw, cw2)
+    pan_file = out.with_suffix(".pan")
+    pan_file.write_text(script)
+    x0 = int(round(float(x[0]))) & ~1
+    x0 = max(0, min(x0, dw - cw2))
+    print(f"    framing: following Orbit — hits {report['hits']:.0%}, "
+          f"still {report['held']:.0%} of the clip, "
+          f"pan {report['pan_p50']:.2f}/{report['pan_p95']:.2f} cw/s"
+          + (f", {report['saturated']:.0%} out of reach"
+             if report["saturated"] > 0.01 else ""))
+    return x0, f"sendcmd=f='{pan_file.as_posix()}',", pan_file
+
+
 def clip(src: str, t_in: float, t_out: float, out: Path,
          hwaccel: str | None = None, level: str | None = None,
-         telemetry: str | None = None, preview: str | None = None) -> Path:
+         telemetry: str | None = None, preview: str | None = None,
+         fps: float | None = None,
+         frame: str = "centre", track: str | None = None,
+         progress: Callable[[float], None] | None = None,
+         stop: Callable[[], bool] | None = None) -> Path:
     """One approved clip as a 1080x1920 Reel.
 
     `level` is None, "constant" (one rotation for the whole clip, removing how
@@ -305,7 +557,40 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     well). Constant needs only the frames; dynamic also needs the telemetry to
     match them, and renders unlevelled when it does not, because an unlevelled
     Reel is still a Reel and a double-tilted one is not.
+
+    `fps` forces an output frame rate. Left alone the clip keeps the source's,
+    which is right for a standalone clip and wrong for a part of a joined one —
+    this library holds both 29.97 and 59.94 rides, and joining those by stream
+    copy yields a file whose timing is nonsense while ffmpeg reports success.
+    `plan_fps` picks the value; see `join`.
+
+    `frame` is "centre" — the fixed middle slice this has always taken — or
+    "subject", which pans the crop to follow Orbit using the `track` parquet
+    that `orbitcut track` writes. Centre stays the default: a change to how
+    every existing clip renders should be asked for, not arrived at.
+
+    Subject framing falls back to centre, out loud, on a clip the detector could
+    not follow — no track, no rows covering it, or too few frames with a box.
+    A centre-cropped Reel is still a Reel; one framed on three detections and
+    nine seconds of guessing is not, and the fallback is the same shape as the
+    one `level="dynamic"` already takes for the same reason.
+
+    `progress` is called with seconds of output written so far, and `stop` is
+    asked four times a second whether to give up — see `_run` for why those are
+    two hooks rather than one.
     """
+    if frame == "subject" and level == "dynamic":
+        # The rotation moves the dog as well as the horizon, so the crop target
+        # would need correcting per frame against the smoothed roll series. The
+        # correction is small — 5 degrees moves a dog 800 px below centre by
+        # about 70 px, against 3632 px of pan and a dead zone of 200 — and its
+        # sign is the exact hazard `level.py` refuses to guess at, where getting
+        # it backwards doubles the error instead of removing it. Refusing is
+        # better than a correction nobody has checked.
+        raise RuntimeError(
+            "subject framing with dynamic levelling is not implemented: the "
+            "per-frame rotation moves the dog too, and that correction has not "
+            "been measured. Use --level constant or none.")
     hwaccel = hwaccel or config.HWACCEL
     meta = probe(src)
     # Orientation first, and explicitly: everything below measures a crop in
@@ -314,6 +599,18 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     deg, why = orientation(meta, telemetry)
     if "container says" in why:
         print(f"    orientation: {deg}° from {why} — trusting the accelerometer")
+
+    # Everything below assumes the decoder hands over the frame as stored. That
+    # is measured, not assumed — see `decode_flags` — and when it cannot be had,
+    # a file that declares a rotation is refused rather than rendered on a guess.
+    rot_flags, coded = decode_flags()
+    container = int(meta.get("rotation") or 0) % 360
+    if not coded and container:
+        raise RuntimeError(
+            f"this ffmpeg applies the container's display matrix whatever it is "
+            f"told, and {Path(src).name} declares {container}°. Correcting for "
+            f"that means trusting a number this library has caught lying. "
+            f"ffmpeg 6.0 or newer accepts -display_rotation, which does work.")
     orient_graph = _orient_graph(deg)
     dw, dh = display_size(meta, deg)
     cw, ch, _x, _y = crop_box(dw, dh)
@@ -358,12 +655,32 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     cw2, ch2 = int(cw * k) & ~1, int(ch * k) & ~1
     x2, y2 = (dw - cw2) // 2, (dh - ch2) // 2
 
+    # Where the crop sits horizontally. Vertically there is never a choice —
+    # every source shape in this library crops to full height — so the whole of
+    # subject framing is this one number over time.
+    pan_graph, pan_file = "", None
+    if frame == "subject":
+        from . import reframe as rf
+        x2, pan_graph, pan_file = _pan(track, t_in, t_out, dw, dh, cw2, out,
+                                       applied if level == "constant" else 0.0,
+                                       fallback=x2)
+
     # trim in the filter graph, not via -ss/-t: with more than one input those
     # bind to whichever input follows them, which once produced a reel twelve
     # times too long that reported success.
+    # The frame rate is settled last, after the rotation the levelling filters
+    # want every source frame for, and before the scale that is the expensive
+    # part of the graph.
+    fps_graph = f"fps={fps:.6f}," if fps else ""
+
     graph = (f"[0:v]trim=start={t_in:.3f}:duration={dur:.3f},setpts=PTS-STARTPTS,"
              f"{orient_graph}"
              f"{rot_graph}"
+             f"{fps_graph}"
+             # sendcmd emits on frame timestamps, so the pan script goes
+             # immediately before the crop it steers and after `fps`, where the
+             # command lands on the same frame `crop` then processes.
+             f"{pan_graph}"
              f"crop={cw2}:{ch2}:{x2}:{y2},"
              f"scale={TARGET_W}:{TARGET_H}:flags=lanczos,"
              f"setsar=1[v]")
@@ -376,42 +693,174 @@ def clip(src: str, t_in: float, t_out: float, out: Path,
     cmd = ["ffmpeg", "-y", "-v", "error",
            *proxy_mod._decode_args(hwaccel if hwaccel != "videotoolbox_vt"
                                    else "videotoolbox"),
-           # Autorotation is off because orientation is decided above, from
-           # gravity. Leaving it on means ffmpeg rotates by whatever the
-           # container claims while the crop below is measured against a frame
-           # shape chosen here — two answers, and no error when they differ.
-           # It is also version-dependent: 6.1 autorotates complex-filtergraph
-           # inputs, older builds do not, so the same command can produce two
-           # different reels from the same file on two machines.
-           "-noautorotate",
+           # Orientation is decided above, from gravity, so the decoder is
+           # asked for the frame as stored. Which flag does that, and whether
+           # any of them does on this build, is measured at `decode_flags` —
+           # `-noautorotate` alone silently stopped working and took every
+           # chest-mounted ride upside down with it.
+           *rot_flags,
            "-i", src, "-filter_complex", graph, *maps, *_encoder(hwaccel),
            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = _run(cmd, progress, stop)
     if r.returncode != 0 and hwaccel != "none":
         # Same ladder as proxy generation: step down rather than abandoning
         # hardware entirely on the first complaint.
         nxt = proxy_mod.FALLBACK.get(hwaccel) or "none"
         first = (r.stderr.strip().splitlines() or ["no stderr"])[0]
         print(f"  ! {hwaccel} failed ({first[:110]}) — retrying with {nxt}")
-        return clip(src, t_in, t_out, out, nxt, level, telemetry, preview)
+        # By keyword past `fps`: this call is positional up to there, and
+        # inserting an argument into the middle of a positional recursive call
+        # is a silent shift rather than an error.
+        return clip(src, t_in, t_out, out, nxt, level, telemetry, preview,
+                    fps, frame=frame, track=track, progress=progress, stop=stop)
     if r.returncode != 0:
         raise RuntimeError(f"render failed: {r.stderr.strip()[:300]}")
     if cmd_file:
         cmd_file.unlink(missing_ok=True)
+    if pan_file:
+        pan_file.unlink(missing_ok=True)
     _check(out, dur)
     return out
 
 
-def compile_reel(parts: list[Path], out: Path) -> Path:
-    """Join rendered clips. Every part shares an encode, so this is a copy."""
+def source_fps(path: str) -> float:
+    """Frame rate of a source, as a number. 0.0 when it cannot be read."""
+    try:
+        num, _, den = probe(path)["fps"].partition("/")
+        return float(num) / float(den or 1)
+    except (RuntimeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def plan_fps(rates: list[float], to: str = "fastest") -> float | None:
+    """One frame rate for a set of clips about to be joined, or None if they agree.
+
+    This library is 29.97 and 59.94 — 52 rides at one, 37 at the other, and the
+    approved clips include both. Stream-copying those together does not fail and
+    does not come out the wrong length; it comes out **variable rate**. Measured
+    on two two-second parts at 30 and 60: 180 frames over 4.02 s, sixty of them
+    33 ms apart and then 119 at 16.7 ms, in a file that declares 60 fps and
+    averages 45. Everything local reads that as fine. It is Instagram's
+    re-encode, on a phone, that decides what to do with it.
+
+    The default target is the fastest of them. `render` has never set an output
+    rate, so a 59.94 ride already renders standalone at 59.94, and conforming a
+    joined cut down to 30 would make the same clip look different depending on
+    what it was joined to. Duplicating frames in a 29.97 clip costs nothing
+    visible; halving a 59.94 one throws away the smoothness it was shot for.
+
+    `to="slowest"` is the other answer, and it is the one the plan's output table
+    gives ("conform 60 fps source down"). It is smaller and it is what Instagram
+    recommends, so it is offered rather than argued with — the UI asks.
+
+    Instagram takes up to 60, so the ceiling never binds on this library and is
+    there for the day a 120 fps clip arrives.
+    """
+    have = sorted({round(r, 3) for r in rates if r > 0})
+    if len(have) < 2:
+        return None
+    return have[0] if to == "slowest" else min(have[-1], MAX_FPS)
+
+
+def avg_fps(path: str | Path) -> float:
+    """Frames actually delivered per second, which is not always the declared rate.
+
+    A concatenated file carries the rate of whichever part came first. This is
+    the number that disagrees with it.
+    """
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v",
+                        "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0",
+                        str(path)], capture_output=True, text=True)
+    try:
+        num, _, den = r.stdout.strip().partition("/")
+        return float(num) / float(den or 1)
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _duration(path: Path) -> float:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def compile_reel(parts: list[Path], out: Path,
+                 hwaccel: str | None = None,
+                 progress: Callable[[float], None] | None = None,
+                 stop: Callable[[], bool] | None = None) -> Path:
+    """Join rendered clips, by copy where a copy is honest and by re-encode where not.
+
+    Parts that share an encode need only be copied, which is the fast path and
+    the usual one — everything `clip` writes is 1080x1920 H.264/AAC. Parts that
+    disagree about frame rate cannot be, and the reason this checks up front
+    rather than afterwards is that the bad copy passes every check made after
+    the fact: right length, right size, right codec, wrong pacing. See
+    `plan_fps` for the measurement.
+
+    The length is still verified, because a copy can go wrong for reasons that
+    have nothing to do with frame rate, and a reel that is silently short is
+    worse than one that failed.
+    """
+    rates = [source_fps(str(p)) for p in parts]
+    if plan_fps(rates) is not None:
+        print(f"    parts disagree on frame rate "
+              f"({', '.join(f'{r:.2f}' for r in sorted(set(rates)))}) "
+              f"— joining by re-encode")
+        return _join_reencode(parts, out, hwaccel, sum(_duration(p) for p in parts),
+                              progress, stop)
+
+    want = sum(_duration(p) for p in parts)
     listing = out.parent / f"{out.stem}_parts.txt"
-    listing.write_text("".join(f"file '{p.name}'\n" for p in parts))
+    # Absolute paths (which -safe 0 already permits) so the parts need not be
+    # siblings of the output; a hand-made cut keeps its clips in its own folder.
+    listing.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in parts))
     r = subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
-         "-i", listing.name, "-c", "copy", "-movflags", "+faststart", out.name],
-        capture_output=True, text=True, cwd=str(out.parent))
+         "-i", str(listing), "-c", "copy", "-movflags", "+faststart", str(out)],
+        capture_output=True, text=True)
+    listing.unlink(missing_ok=True)
+
+    got = _duration(out) if r.returncode == 0 else 0.0
+    if r.returncode == 0 and (want <= 0 or abs(got - want) <= max(0.5, 0.02 * want)):
+        return out
+    if r.returncode == 0:
+        print(f"    join by copy came out {got:.1f}s against {want:.1f}s of parts "
+              f"— re-encoding the join")
+    return _join_reencode(parts, out, hwaccel, want, progress, stop)
+
+
+def _join_reencode(parts: list[Path], out: Path, hwaccel: str | None,
+                   want: float, progress: Callable[[float], None] | None = None,
+                   stop: Callable[[], bool] | None = None) -> Path:
+    """Join by decoding, for parts a copy cannot honestly splice.
+
+    The concat *filter* rather than the demuxer: it resamples each input onto
+    one timeline instead of trusting them to already share one, which is the
+    whole reason for being here.
+    """
+    hwaccel = hwaccel or config.HWACCEL
+    fps = plan_fps([source_fps(str(p)) for p in parts]) or source_fps(str(parts[0]))
+    ins: list[str] = []
+    pre, legs = [], []
+    for n, part in enumerate(parts):
+        ins += ["-i", str(part)]
+        pre.append(f"[{n}:v]fps={fps:.6f},setsar=1[v{n}];"
+                   f"[{n}:a]aresample=48000[a{n}]")
+        legs.append(f"[v{n}][a{n}]")
+    graph = ";".join(pre) + ";" + "".join(legs) + f"concat=n={len(parts)}:v=1:a=1[v][a]"
+    cmd = ["ffmpeg", "-y", "-v", "error", *ins, "-filter_complex", graph,
+           "-map", "[v]", "-map", "[a]", *_encoder(hwaccel),
+           "-c:a", "aac", "-b:a", AUDIO_KBPS, "-ar", "48000",
+           "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
+    r = _run(cmd, progress, stop)
     if r.returncode != 0:
         raise RuntimeError(f"concat failed: {r.stderr.strip()[:300]}")
+    got = _duration(out)
+    if want > 0 and abs(got - want) > max(1.0, 0.05 * want):
+        raise RuntimeError(f"{out.name} is {got:.1f}s but its parts total {want:.1f}s")
     return out
 
 

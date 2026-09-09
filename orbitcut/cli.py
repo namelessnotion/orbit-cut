@@ -775,6 +775,38 @@ def cmd_calibrate(args) -> int:
     return 0
 
 
+def _overlay_track(conn, row, args) -> int:
+    """Draw the dog boxes and the solved crop window on one clip of the proxy."""
+    import pandas as pd
+
+    if not row["track_path"] or not Path(row["track_path"]).exists():
+        print("no track yet — run `orbitcut track` first")
+        return 1
+    track = pd.read_parquet(row["track_path"])
+    segs = db.segments(conn, row["content_hash"])
+    if args.clip:
+        segs = [s for s in segs if s["id"] == args.clip] or segs[:1]
+    else:
+        segs = [s for s in segs if s["status"] == "approved"] or segs[:1]
+    if not segs:
+        print("no candidate clips — run `orbitcut clips` first")
+        return 1
+
+    for s in segs[:args.top]:
+        t_in = s["t_in_user"] if s["t_in_user"] is not None else s["t_in"]
+        t_out = s["t_out_user"] if s["t_out_user"] is not None else s["t_out"]
+        out, rep = ov_mod.render_track(row, track, t_in, t_out)
+        print(f"  {Path(out).name}  {t_in:.0f}-{t_out:.0f}s   "
+              f"hits {rep['hits']:.0%}  held {rep['held']:.0%}  "
+              f"pan p50 {rep['pan_p50']:.3f} p95 {rep['pan_p95']:.3f} cw/s  "
+              f"saturated {rep['saturated']:.0%}")
+        print(f"    {out}")
+    print("\n  Green is the detector. Orange is what the Reel would keep, thick")
+    print("  while it is tracking and thin while it is holding through a gap.")
+    print("  Grey is the dead zone: inside it the camera is entitled to sit still.")
+    return 0
+
+
 def cmd_overlay(args) -> int:
     import pandas as pd
     conn = db.connect()
@@ -796,6 +828,9 @@ def cmd_overlay(args) -> int:
     _weights_notice(table, weights)
     ev_path = config.derived_dir(row["content_hash"]) / "air_events.parquet"
     events = pd.read_parquet(ev_path) if ev_path.exists() else None
+
+    if args.track:
+        return _overlay_track(conn, row, args)
 
     print(f"rendering {row['filename']}...")
     out = ov_mod.render(row["proxy_path"], scored, events,
@@ -880,6 +915,124 @@ def cmd_clips(args) -> int:
     return 0
 
 
+def cmd_track(args) -> int:
+    """Find Orbit in a ride's proxy and store where he was, second by second."""
+    import time
+    from . import track as tr
+
+    conn = db.connect()
+    if args.asset:
+        row = _find(conn, args.asset)
+        if row is None:
+            return 1
+        rows = [row]
+    else:
+        rows = [r for r in db.assets(conn)
+                if r["proxy_path"] and (r["duration_s"] or 0) >= config.MIN_RIDE_S]
+    if not rows:
+        print("nothing ingested yet — run `orbitcut ingest`")
+        return 1
+    rows = [r for r in rows if r["proxy_path"] and Path(r["proxy_path"]).exists()]
+    if not rows:
+        print("no proxies — tracking reads the proxy, not the original")
+        return 1
+
+    # Loaded once and reused across every ride, because it costs seconds — and
+    # loaded *before* the header rather than under it, because rfdetr and torch
+    # write several lines of their own to stderr on the way up and they would
+    # otherwise land in the middle of the table.
+    print(f"loading {args.size} detector...", flush=True)
+    det = tr.detect_mod.load(args.size)
+    print(f"  {det.name} on {getattr(det, 'device', '?')}\n")
+
+    fails = skipped = 0
+    hdr = f"{'file':<20}{'looked':>8}{'found':>7}{'rate':>7}{'rejects':>9}{'took':>8}"
+    print(hdr); print("-" * len(hdr))
+    for r in sorted(rows, key=lambda r: (r["ride_id"] or "", r["chapter"] or 0)):
+        spans = None
+        if args.windows:
+            segs = db.segments(conn, r["content_hash"])
+            spans = [(max(0.0, (s["t_in_user"] if s["t_in_user"] is not None
+                                else s["t_in"]) - args.pad),
+                      (s["t_out_user"] if s["t_out_user"] is not None
+                       else s["t_out"]) + args.pad) for s in segs]
+            if not spans:
+                print(f"{(r['filename'] or '')[:19]:<20}  no candidates to window to")
+                continue
+        # Idempotency, the same as every other stage: a finished full-coverage
+        # track is not redone. This matters more here than elsewhere — a whole
+        # library is hours, and without it an interrupted run restarts from the
+        # beginning rather than resuming. A windowed run never records the
+        # stage, so it never satisfies this and never blocks a full one.
+        if not args.force and not args.windows \
+                and db.stage_done(conn, r["content_hash"], "track"):
+            skipped += 1
+            continue
+
+        started, t0 = db.now(), time.time()
+        # With --windows the playhead stops at the last window, not the end of
+        # the ride, so measuring against the ride's length finishes at 86% and
+        # reads as having given up early.
+        dur = (max(b for _, b in spans) if spans else (r["duration_s"] or 1.0)) or 1.0
+        name = (r["filename"] or "")[:19]
+
+        # A ride is the better part of a minute and the table only prints when
+        # one finishes, which reads as a hang. Overwrite one line as it goes;
+        # the finished row lands on top of it.
+        # Only to a terminal: a carriage return is an overwrite there and just
+        # noise in a pipe or a log, where the finished row says everything.
+        live = sys.stdout.isatty()
+
+        def tick(t, looked, hits, _n=name, _d=dur):
+            if not live:
+                return
+            sys.stdout.write(f"\r{_n:<20}{looked:>8}{hits:>7}"
+                             f"{(hits / looked if looked else 0):>7.2f}"
+                             f"{'':>9}{min(t / _d, 1.0):>7.0%} of the ride")
+            sys.stdout.flush()
+
+        try:
+            res = tr.run(r, size=args.size, hz=args.hz, spans=spans, detector=det,
+                         progress=tick)
+        except Exception as exc:
+            fails += 1
+            db.record_stage(conn, r["content_hash"], "track", "error", started, str(exc))
+            print(f"\r{' ' * 78}\r" if live else "", end="")
+            print(f"{name:<20}  ! {str(exc)[:60]}")
+            continue
+        db.upsert_asset(conn, r["content_hash"], **res)
+        # A windowed run deliberately does not count as the stage being done:
+        # a partial track that satisfied `stage_done` would make a later full
+        # run a silent no-op, and the gap would never be noticed.
+        if not args.windows:
+            db.record_stage(conn, r["content_hash"], "track", "ok", started)
+        looked, hits = res["track_frames"], res["track_hits"]
+        rej = int(pd_read_rejects(res["track_path"]))
+        print(f"\r{' ' * 78}\r" if live else "", end="")
+        print(f"{name:<20}{looked:>8}{hits:>7}"
+              f"{(hits / looked if looked else 0):>7.2f}{rej:>9}"
+              f"{time.time() - t0:>7.0f}s")
+
+    if skipped:
+        print(f"\n  {skipped} ride(s) already tracked and skipped — --force redoes them.")
+    print(f"\n  Detection runs on the proxy, in the band Orbit occupies, split")
+    print(f"  into overlapping tiles — measured at 3.5x the recall of handing")
+    print(f"  the model a whole squashed frame. `rejects` is dog-class boxes the")
+    print(f"  priors threw out, which on a chest mount is mostly your forearm.")
+    if args.windows:
+        print("  Windowed run: the parquet is written, the stage is NOT marked done.")
+    print("\n  next: orbitcut overlay <ride> --track   — watch the boxes")
+    return 1 if fails else 0
+
+
+def pd_read_rejects(path: str) -> int:
+    import pandas as pd
+    try:
+        return int(pd.read_parquet(path, columns=["n_rejected"])["n_rejected"].sum())
+    except Exception:
+        return 0
+
+
 def cmd_reel(args) -> int:
     from . import reel as reel_mod
 
@@ -944,6 +1097,82 @@ def cmd_review(args) -> int:
         print("  Every one of those is a labelled example: feature vector -> your")
         print("  taste. At around 100-150 a fit on this log beats the hand-set")
         print("  weights, which is the point of recording it.")
+    return 0
+
+
+def cmd_cut(args) -> int:
+    """Pick approved clips in a browser and queue the renders."""
+    import time
+    from . import cut as cut_mod
+
+    conn = db.connect()
+    orphaned = db.orphaned_jobs(conn)
+    if orphaned:
+        print(f"  {orphaned} job(s) were left running by a previous stop — "
+              f"marked failed; queue them again")
+
+    server, worker, url, n = cut_mod.serve(conn, args.asset, args.port,
+                                           open_browser=not args.no_open)
+    if server is None:
+        print("nothing approved to cut — run `orbitcut review` first")
+        return 1
+
+    print(f"\n  {n} approved clip(s) at {url}")
+    print("  j/k move   space pick   p play the cut   c clear")
+    print("  enter queue as one file   shift-enter queue each separately")
+    print(f"\n  Renders land in {config.RENDERS / cut_mod.CUTS}.")
+    print("  The queue is stored, so reloading the tab is safe. Ctrl-C to stop.\n")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        worker.shutdown()
+
+    rows = conn.execute(
+        "SELECT status, COUNT(*) c FROM render_job GROUP BY status").fetchall()
+    if rows:
+        print("\n  " + ",  ".join(f"{r['c']} {r['status']}" for r in rows))
+    return 0
+
+
+def cmd_shelf(args) -> int:
+    """Browse finished renders, and hand one to the phone over the wifi."""
+    import time
+    from . import shelf as shelf_mod
+
+    conn = db.connect()
+    server, url, n, lan = shelf_mod.serve(conn, args.port, args.local_only,
+                                          open_browser=not args.no_open)
+    if not n:
+        print(f"nothing rendered yet — {config.RENDERS} is empty")
+        print("run `orbitcut cut` (pick clips) or `orbitcut render` (everything)")
+        server.shutdown()
+        return 1
+
+    print(f"\n  {n} finished render(s) at {url}")
+    if lan:
+        print(f"\n  Reachable from your phone on this network at {lan}.")
+        print("  Scan a clip's QR code with the phone camera, download it, then")
+        print("  Share -> Save Video to put it in Photos, and post from there.")
+        print("\n  Every path is behind a one-off token that is not written down")
+        print("  and dies with this process. Only files under")
+        print(f"  {config.RENDERS} are reachable, and nothing here writes.")
+    elif args.local_only:
+        print("\n  --local-only: loopback, no QR codes. Nothing is on the network.")
+    else:
+        print("\n  No network address found, so this is loopback only and there")
+        print("  are no QR codes. Join a wifi network and run it again.")
+    print("\n  Ctrl-C to stop.\n")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
     return 0
 
 
@@ -1610,13 +1839,19 @@ def cmd_level(args) -> int:
     # The crop cost is a property of the source shape, not of the ride, so it is
     # printed once. It is the whole argument against dynamic on 16:9.
     print("\n  what a rotation costs, by source shape:")
-    print(f"  {'shape':<14}{'crop':>12}{'max angle':>11}{'width at 5°':>13}")
-    for name, (w, h) in (("8:7 4K", (3956, 3460)), ("8:7 5.3K", (5312, 4648)),
-                         ("16:9 4K", (3840, 2160)), ("16:9 5.3K", (5312, 2988))):
+    print(f"  {'shape':<14}{'crop':>12}{'max angle':>11}{'width at 5°':>13}"
+          f"{'spare':>18}")
+    # The shapes this library actually holds, with their counts — an earlier
+    # version of this table listed 3956x3460 and 3840x2160, neither of which
+    # exists here, so the costs it printed were for footage nobody has.
+    for name, (w, h) in (("16:9 5.3K x52", (5312, 2988)),
+                         ("8:7 4K   x37", (3840, 3360)),
+                         ("8:7 5.3K  x8", (5312, 4648))):
         cw, ch, _x, _y = rn.crop_box(w, h)
         budget = rn.rotation_budget(cw, ch, w, h)
         at5 = int(cw * rn.safe_scale(cw, ch, w, h, 5.0))
-        print(f"  {name:<14}{f'{cw}x{ch}':>12}{budget:>10.1f}°{at5:>13}")
+        print(f"  {name:<14}{f'{cw}x{ch}':>12}{budget:>10.1f}°{at5:>13}"
+              f"{w - cw:>10} px pan")
     print(f"\n  Angles are clamped so the crop never drops under {rn.TARGET_W} wide;")
     print("  levelling further would mean upscaling, which is worse than a tilt.")
     print("  Dynamic also removes the lean itself — on a bike the lean is the")
@@ -1667,7 +1902,8 @@ def cmd_render(args) -> int:
             try:
                 rn.clip(a["source_path"], t_in, t_out, out,
                         level=None if args.level == "none" else args.level,
-                        telemetry=a["telemetry_path"], preview=a["proxy_path"])
+                        telemetry=a["telemetry_path"], preview=a["proxy_path"],
+                        frame=args.frame, track=a["track_path"])
                 parts.append({"path": out, "t_in": t_in, "t_out": t_out})
                 print(f"    {out.name}  {t_out - t_in:.1f}s")
                 made.append(out)
@@ -1691,7 +1927,9 @@ def cmd_render(args) -> int:
     print(f"\n  {len(made)} file(s) in {out_root}"
           + (f", {failed} failure(s)" if failed else ""))
     print(f"  1080x1920, H.264/AAC, faststart — Instagram's recommended shape."
-          + (f"\n  Horizon: {args.level}." if args.level != "none" else ""))
+          + (f"\n  Horizon: {args.level}." if args.level != "none" else "")
+          + ("\n  Framing: following Orbit, falling back to centre where the "
+             "track is thin." if args.frame == "subject" else ""))
     print("  Compilations are capped under three minutes and split into parts")
     print("  rather than truncated, so no clip is ever cut off mid-action.")
     return 1 if failed else 0
@@ -1857,6 +2095,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("asset", help="hash prefix, filename or ride number")
     p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
     p.add_argument("--sharpness", type=float, help="peak emphasis; see calibrate")
+    p.add_argument("--track", action="store_true",
+                   help="draw Orbit's boxes and the solved crop window instead "
+                        "of the score curve; needs `orbitcut track`")
+    p.add_argument("--clip", type=int, help="one segment id, with --track")
+    p.add_argument("--top", type=int, default=2,
+                   help="how many clips to draw with --track (default 2)")
     p.set_defaults(fn=cmd_overlay)
 
     p = sub.add_parser("clips", help="pick candidate clips from scored rides")
@@ -1865,6 +2109,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--weights", help="override, e.g. speed=0.5,turn=0.2")
     p.add_argument("--sharpness", type=float, help="peak emphasis; see calibrate")
     p.set_defaults(fn=cmd_clips)
+
+    p = sub.add_parser("track", help="find Orbit in a ride, for subject framing")
+    p.add_argument("asset", nargs="?", help="hash prefix, filename or ride number")
+    p.add_argument("--size", choices=("nano", "small", "medium"),
+                   default="medium",
+                   help="detector size (default medium — measured slightly "
+                        "better than nano, and framing matters more than either)")
+    p.add_argument("--hz", type=float, default=5.0,
+                   help="frames per second shown to the detector (default 5)")
+    p.add_argument("--windows", action="store_true",
+                   help="detect only over candidate clips, not the whole ride; "
+                        "does not mark the stage done")
+    p.add_argument("--pad", type=float, default=2.0,
+                   help="seconds either side of a window (default 2)")
+    p.add_argument("--force", action="store_true",
+                   help="re-track rides that are already done")
+    p.set_defaults(fn=cmd_track)
 
     p = sub.add_parser("reel", help="render a ride's candidates back to back")
     p.add_argument("asset", help="hash prefix, filename or ride number")
@@ -1875,6 +2136,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=0, help="default: pick a free one")
     p.add_argument("--no-open", action="store_true", help="do not open a browser")
     p.set_defaults(fn=cmd_review)
+
+    p = sub.add_parser("cut", help="pick approved clips in a browser and "
+                                   "queue the renders")
+    p.add_argument("asset", nargs="?", help="limit to one ride")
+    p.add_argument("--port", type=int, default=0, help="default: pick a free one")
+    p.add_argument("--no-open", action="store_true", help="do not open a browser")
+    p.set_defaults(fn=cmd_cut)
+
+    p = sub.add_parser("shelf", help="browse finished renders; QR them to your phone")
+    p.add_argument("--port", type=int, default=0, help="default: pick a free one")
+    p.add_argument("--local-only", action="store_true",
+                   help="loopback only — no LAN, and therefore no QR codes")
+    p.add_argument("--no-open", action="store_true", help="do not open a browser")
+    p.set_defaults(fn=cmd_shelf)
 
     p = sub.add_parser("orient", help="which way up each file really is")
     p.add_argument("asset", nargs="?", help="limit to one ride or filename")
@@ -1924,6 +2199,11 @@ def main(argv: list[str] | None = None) -> int:
                         "or lock the horizon per frame; see `orbitcut level` — "
                         "on this library the mount measures square, so constant "
                         "has nothing to do and dynamic is a taste call")
+    p.add_argument("--frame", choices=("centre", "subject"), default="centre",
+                   help="9:16 framing: the fixed centre crop (default), or pan "
+                        "to follow Orbit — needs `orbitcut track`, and falls "
+                        "back to centre on a clip the detector could not "
+                        "follow; watch it first with `overlay --track`")
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("level", help="what the horizon is doing, and what "

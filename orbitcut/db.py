@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS asset (
     air_longest_s  REAL,
     telemetry_path TEXT,
     imu_path       TEXT,
+    track_path     TEXT,
+    track_hz       REAL,
+    track_detector TEXT,           -- a track from a different model is a
+                                   -- different quantity, not a better one
+    track_frames   INTEGER,        -- frames the detector was actually shown
+    track_hits     INTEGER,        -- ...and how many of them it found him in
     archived_path  TEXT,
     archived_at    TEXT,
 
@@ -99,6 +105,35 @@ CREATE TABLE IF NOT EXISTS segment (
     UNIQUE (content_hash, t_in)
 );
 
+-- A render the user asked for from the `cut` UI: one clip, or several joined
+-- into one file. Kept in SQLite rather than in the server's memory so that
+-- closing the browser, or the tab reloading, does not lose a queue that takes
+-- twenty minutes of full-resolution decode to work through — and so that what
+-- was rendered, from which segments, is still answerable afterwards.
+--
+-- Unlike `segment` this table is disposable: every row can be rebuilt by
+-- selecting the same clips again. It records intent and outcome, not judgement.
+CREATE TABLE IF NOT EXISTS render_job (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL,
+    segment_ids   TEXT NOT NULL,     -- json list, in the order they play
+    level         TEXT,              -- none | constant | dynamic
+    frame         TEXT,              -- centre | subject. Stored for the same
+                                     -- reason as level: without it the queue
+                                     -- silently renders centred while the CLI
+                                     -- renders subject-tracked.
+    fps           REAL,              -- what every part was normalised to
+    status        TEXT NOT NULL,     -- queued|running|done|error|cancelled
+    step          TEXT,              -- what it is doing right now, for the UI
+    done_s        REAL,              -- seconds of output written so far
+    total_s       REAL,              -- seconds of output expected
+    out_path      TEXT,
+    error         TEXT,
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    finished_at   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS stage_run (
     content_hash  TEXT NOT NULL,
     stage         TEXT NOT NULL,
@@ -118,6 +153,7 @@ CREATE INDEX IF NOT EXISTS idx_asset_ride     ON asset(ride_id, chapter);
 CREATE INDEX IF NOT EXISTS idx_stage_status   ON stage_run(stage, status);
 CREATE INDEX IF NOT EXISTS idx_segment_asset  ON segment(content_hash, rank);
 CREATE INDEX IF NOT EXISTS idx_segment_status ON segment(status);
+CREATE INDEX IF NOT EXISTS idx_job_status     ON render_job(status, id);
 """
 
 
@@ -176,7 +212,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     a new column in SCHEMA would otherwise surface as an OperationalError on the
     next insert. Additive-only, which covers every change so far.
     """
-    for table in ("asset", "stage_run"):
+    for table in ("asset", "stage_run", "render_job"):
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if not have:
             continue
@@ -287,6 +323,57 @@ def segments(conn: sqlite3.Connection, content_hash: str | None = None,
     if status:
         sql += " AND status = ?"; args.append(status)
     return conn.execute(sql + " ORDER BY content_hash, rank, t_in", args).fetchall()
+
+
+# ------------------------------------------------------------------ render jobs
+def enqueue_job(conn: sqlite3.Connection, name: str, segment_ids: list[int],
+                level: str | None, fps: float | None, total_s: float,
+                frame: str = "centre") -> int:
+    cur = conn.execute(
+        """INSERT INTO render_job
+               (name, segment_ids, level, fps, frame, status, total_s, done_s,
+                created_at)
+           VALUES (?,?,?,?,?,'queued',?,0,?)""",
+        (name, json.dumps(list(segment_ids)), level, fps, frame, total_s, now()))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def jobs(conn: sqlite3.Connection, limit: int = 60) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM render_job ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+
+def next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """The oldest queued job. Order is the queue's only promise."""
+    return conn.execute(
+        "SELECT * FROM render_job WHERE status = 'queued' ORDER BY id LIMIT 1"
+    ).fetchone()
+
+
+def update_job(conn: sqlite3.Connection, job_id: int, **fields: Any) -> None:
+    if not fields:
+        return
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    conn.execute(f"UPDATE render_job SET {sets} WHERE id = ?",
+                 [*fields.values(), job_id])
+    conn.commit()
+
+
+def orphaned_jobs(conn: sqlite3.Connection) -> int:
+    """Mark jobs left mid-render by a killed process.
+
+    The worker lives in the `cut` server, so Ctrl-C during a render leaves a row
+    saying `running` with nothing running. Reporting that as an error on the next
+    start is honest — the output is half-written or absent, and the fix is to
+    queue it again, which is one click.
+    """
+    cur = conn.execute(
+        "UPDATE render_job SET status = 'error', error = ?, finished_at = ? "
+        "WHERE status = 'running'",
+        ("interrupted — orbitcut cut was stopped mid-render", now()))
+    conn.commit()
+    return cur.rowcount
 
 
 def stale_stage(conn: sqlite3.Connection, stage: str) -> list[str]:

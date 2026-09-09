@@ -15,6 +15,13 @@ dependencies = [
 
 [project.optional-dependencies]
 sun = ["astral>=3.2"]
+# The dog detector. An extra rather than a dependency because it is two
+# gigabytes of wheels and `ingest` must not pay for them to make a proxy —
+# every torch import in this package is inside a function for the same reason.
+# `requires-python` deliberately stays at 3.11 (see README, "On Python
+# versions"); torch and torchvision ship cp314 wheels, so the pin does not need
+# relaxing to install this here.
+vision = ["rfdetr>=1.10", "torch>=2.14", "torchvision>=0.29"]
 
 [project.scripts]
 orbitcut = "orbitcut.cli:main"

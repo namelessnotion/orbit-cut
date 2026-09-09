@@ -34,15 +34,15 @@ measurement from real footage, replacing the corresponding assumption above.
 
 ### Streams actually present
 
-| Stream | Rate | Note |
-|---|---|---|
-| ACCL | 201.3 Hz | full rate — the freefall detector gets ~20 samples per 100 ms window |
-| GYRO | 201.3 Hz | full rate |
-| GRAV, CORI, IORI | 30.0 Hz | locked to frame rate, as documented for HERO8+ |
-| ISOE, SHUT | 30.0 Hz | exposure response — the no-GPS day/night fallback |
-| WBAL | 10.0 Hz | |
-| TMPC | 1.0 Hz | |
-| **GPS5** | **absent** | **GPS is switched off in the camera** |
+| Stream           | Rate       | Note                                                                 |
+| ---------------- | ---------- | -------------------------------------------------------------------- |
+| ACCL             | 201.3 Hz   | full rate — the freefall detector gets ~20 samples per 100 ms window |
+| GYRO             | 201.3 Hz   | full rate                                                            |
+| GRAV, CORI, IORI | 30.0 Hz    | locked to frame rate, as documented for HERO8+                       |
+| ISOE, SHUT       | 30.0 Hz    | exposure response — the no-GPS day/night fallback                    |
+| WBAL             | 10.0 Hz    |                                                                      |
+| TMPC             | 1.0 Hz     |                                                                      |
+| **GPS5**         | **absent** | **GPS is switched off in the camera**                                |
 
 `mean |accel|` 10.72 m/s², `mean |gravity|` 1.000 — both healthy. Mean |accel|
 sits above 9.81 on any real ride because vibration adds to gravity.
@@ -69,7 +69,7 @@ Two earlier metrics were wrong and the reasons are recorded in the README: an
 `IORI`-magnitude test cannot separate levelling from HyperSmooth, and a
 quaternion-spread test is swamped by yaw. Gravity is immune to both problems.
 
-Note also that 13.2° of body tilt is *modest* for mountain biking, and that is
+Note also that 13.2° of body tilt is _modest_ for mountain biking, and that is
 the chest mount behaving as predicted: the torso stays upright while the bike
 leans underneath it.
 
@@ -102,7 +102,6 @@ further weakens the case for ever distributing this across three machines.
    late June — full daylight under dense canopy. It cannot separate shade from
    dusk. Another reason GPS matters.
 
-
 ## The core bet: the camera already measured the action
 
 Every GoPro from HERO5 on writes a GPMF telemetry track: accelerometer ~200 Hz, gyro
@@ -124,17 +123,17 @@ The HERO11 is close to the best case for this design — the last generation wit
 the HERO12 dropped GPS entirely, and new enough to carry the HERO8+ orientation streams.
 Every signal the pipeline wants is present.
 
-| Stream | Rate | Carries | HERO11 |
-|---|---|---|---|
-| ACCL | ~200 Hz | roughness, impacts, **freefall/airtime**, braking | yes |
-| GYRO | 200–3200 Hz | yaw rate → turn count, cornering intensity | yes |
-| GPS5 | 18 Hz | speed, gradient, route → trail ID | superseded by GPS9 on this body |
-| GRAV | frame rate | **mount inference**, horizon leveling | yes |
-| CORI | frame rate | camera orientation in world → **head-turn compensation** | yes |
-| IORI | frame rate | image orientation vs camera body → **what the camera already corrected** | yes |
-| SHUT/ISOE | frame rate | low-light / motion-blur quality gates | yes |
-| Frames | 30–120 fps | subject, scene, dog, trail region, aesthetics | yes |
-| GPS9 | 10 Hz | higher-precision GPS, per-sample timing, DOP and fix | **yes — this is what the HERO11 writes** |
+| Stream    | Rate        | Carries                                                                  | HERO11                                   |
+| --------- | ----------- | ------------------------------------------------------------------------ | ---------------------------------------- |
+| ACCL      | ~200 Hz     | roughness, impacts, **freefall/airtime**, braking                        | yes                                      |
+| GYRO      | 200–3200 Hz | yaw rate → turn count, cornering intensity                               | yes                                      |
+| GPS5      | 18 Hz       | speed, gradient, route → trail ID                                        | superseded by GPS9 on this body          |
+| GRAV      | frame rate  | **mount inference**, horizon leveling                                    | yes                                      |
+| CORI      | frame rate  | camera orientation in world → **head-turn compensation**                 | yes                                      |
+| IORI      | frame rate  | image orientation vs camera body → **what the camera already corrected** | yes                                      |
+| SHUT/ISOE | frame rate  | low-light / motion-blur quality gates                                    | yes                                      |
+| Frames    | 30–120 fps  | subject, scene, dog, trail region, aesthetics                            | yes                                      |
+| GPS9      | 10 Hz       | higher-precision GPS, per-sample timing, DOP and fix                     | **yes — this is what the HERO11 writes** |
 
 **Correction: GPS9 is not HERO13-only.** The table above said so for several revisions and the
 code has always depended on the opposite — `gps.py` prefers GPS9 and parses it in-tree because
@@ -145,14 +144,14 @@ uncorrected, that row would have talked a future decision out of relying on any 
 
 ### Measured — a fix field that says zero is not a missing fix field
 
-`score.compute` gated speed on the GPS fix only when the stream reported a lock *somewhere*, so
+`score.compute` gated speed on the GPS fix only when the stream reported a lock _somewhere_, so
 that a camera which never writes GPSF would not lose its GPS entirely. Reasonable. But it made
 "no fix field" and "fix field present, reading zero on every sample" the same case, and they are
 opposites: the second is the receiver telling you, continuously, that it has nothing.
 
 Five files in this library are exactly that — fix 0 throughout, DOP pinned at 100, position
 0.0/0.0, `gps_days` a constant placeholder, and `gps_speed2d` exactly 0.00 for the whole ride.
-They were passed through as a *finite* zero on 768 of 769 seconds, which put them in the
+They were passed through as a _finite_ zero on 768 of 769 seconds, which put them in the
 speed+turn+rough availability bucket on the strength of a number the receiver had disowned, and
 fed roughly 3,800 fabricated zeros into the corpus percentile for speed — deflating the scale
 for every genuinely-located ride.
@@ -171,11 +170,11 @@ corpus that renormalised over missing features, and it cost this.
 The HERO11's 1/1.9" sensor is natively **8:7**, 13% taller than the previous generation, built
 specifically so you can crop the sides off for vertical without losing height.
 
-| Capture mode | Source | 9:16 crop | Pan range | What you see |
-|---|---|---|---|---|
-| **5.3K30 8:7** | 5312×4648 | 2614×4648 | 2698 px | Full sensor height — trail ahead, sky, and the bike. 2.4× oversampled into 1080×1920 |
-| **4K60 8:7** | 3956×3460 | 1946×3460 | 2010 px | Same framing at 60 fps — the better everyday mode for MTB |
-| 5.3K60 16:9 | 5312×2988 | 1681×2988 | 3631 px | A narrow vertical slice of a wide view. More pan freedom, worse composition |
+| Capture mode   | Source    | 9:16 crop | Pan range | What you see                                                                         |
+| -------------- | --------- | --------- | --------- | ------------------------------------------------------------------------------------ |
+| **5.3K30 8:7** | 5312×4648 | 2614×4648 | 2698 px   | Full sensor height — trail ahead, sky, and the bike. 2.4× oversampled into 1080×1920 |
+| **4K60 8:7**   | 3956×3460 | 1946×3460 | 2010 px   | Same framing at 60 fps — the better everyday mode for MTB                            |
+| 5.3K60 16:9    | 5312×2988 | 1681×2988 | 3631 px   | A narrow vertical slice of a wide view. More pan freedom, worse composition          |
 
 Shooting 16:9 and cropping to vertical throws away the part of the frame that makes MTB POV
 read well — the trail disappearing ahead and the terrain immediately in front of the wheel.
@@ -198,7 +197,7 @@ telemetry trustworthy. (This downgrades a MEDIUM risk from v0.1.)
 ## Capture settings
 
 Most GoPro settings guides optimize for how footage looks straight out of camera. Two of these
-deliberately diverge, because footage here is also *input to algorithms* — and a setting that
+deliberately diverge, because footage here is also _input to algorithms_ — and a setting that
 makes a clip look marginally better while making frame geometry unpredictable is a bad trade.
 
 ```
@@ -227,15 +226,15 @@ NOT AVAILABLE IN 8:7
 
 ### Why these, specifically for this pipeline
 
-| Setting | Value | Pipeline-specific reason |
-|---|---|---|
-| **Bit rate** | High | Your delivered pixels come from about **half the frame width**. A 9:16 crop out of 8:7 is effectively viewing the source magnified, so compression artifacts invisible in a full-frame export become visible in the vertical crop. The one setting where "High" is not a nicety |
-| **10-bit** | On | Forest riding is a shadow-gradient nightmare — dappled light under canopy is exactly where 8-bit bands. M4 Max decodes 10-bit HEVC in hardware, so cost is ~zero. Pin color primaries/transfer explicitly in the render command |
-| **ISO max** | 1600 | Capping lower pushes the camera to lengthen shutter instead, and **motion blur hurts the dog detector more than noise does** — noise partly denoises out, blur is gone forever. Set 1600, then read the `ISOE` stream across your library: if you never exceed 400, tighten it. Let telemetry answer this |
-| **Shutter** | Auto | The 180° rule wants 1/120 at 60 fps, but with no ND a fixed shutter clips every time you exit tree cover into sun. Auto + a blur gate derived from the `SHUT` stream you already record |
-| **EV comp** | −0.5 | GoPro meters for the average and blows the sky gaps. Shadows come back, clipped highlights don't. −1.0 on hard-sun days with open canopy |
-| **Sharpness** | Low | GoPro's sharpening halos compress badly, wasting the bitrate you just paid for, and the crop magnifies them. Sharpen at the end of the render chain — after crop and scale, the correct order anyway |
-| **Digital lens** | Wide | 8:7 gives no choice, which is lucky: HyperView/SuperView apply a nonlinear horizontal stretch that would wreck the optical-flow focus-of-expansion and make crop geometry non-uniform |
+| Setting          | Value | Pipeline-specific reason                                                                                                                                                                                                                                                                                  |
+| ---------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bit rate**     | High  | Your delivered pixels come from about **half the frame width**. A 9:16 crop out of 8:7 is effectively viewing the source magnified, so compression artifacts invisible in a full-frame export become visible in the vertical crop. The one setting where "High" is not a nicety                           |
+| **10-bit**       | On    | Forest riding is a shadow-gradient nightmare — dappled light under canopy is exactly where 8-bit bands. M4 Max decodes 10-bit HEVC in hardware, so cost is ~zero. Pin color primaries/transfer explicitly in the render command                                                                           |
+| **ISO max**      | 1600  | Capping lower pushes the camera to lengthen shutter instead, and **motion blur hurts the dog detector more than noise does** — noise partly denoises out, blur is gone forever. Set 1600, then read the `ISOE` stream across your library: if you never exceed 400, tighten it. Let telemetry answer this |
+| **Shutter**      | Auto  | The 180° rule wants 1/120 at 60 fps, but with no ND a fixed shutter clips every time you exit tree cover into sun. Auto + a blur gate derived from the `SHUT` stream you already record                                                                                                                   |
+| **EV comp**      | −0.5  | GoPro meters for the average and blows the sky gaps. Shadows come back, clipped highlights don't. −1.0 on hard-sun days with open canopy                                                                                                                                                                  |
+| **Sharpness**    | Low   | GoPro's sharpening halos compress badly, wasting the bitrate you just paid for, and the crop magnifies them. Sharpen at the end of the render chain — after crop and scale, the correct order anyway                                                                                                      |
+| **Digital lens** | Wide  | 8:7 gives no choice, which is lucky: HyperView/SuperView apply a nonlinear horizontal stretch that would wreck the optical-flow focus-of-expansion and make crop geometry non-uniform                                                                                                                     |
 
 ### HyperSmooth On, not AutoBoost — a fixed crop is worth more than a smooth one
 
@@ -243,7 +242,7 @@ Every stabilization level buys smoothness by cropping in: standard ≈10% of the
 15–20%. **AutoBoost varies that crop dynamically**, expanding and contracting with detected
 motion. Clever for handheld. For this pipeline it breaks three things at once:
 
-- The **counter-steer** for helmet head-turn maps a yaw *angle* to a pixel offset. That mapping
+- The **counter-steer** for helmet head-turn maps a yaw _angle_ to a pixel offset. That mapping
   depends on FOV — if FOV drifts mid-clip, the correction is wrong by a time-varying factor.
 - The **optical-flow speed cross-check** reads flow magnitude, which scales with FOV. A varying
   crop injects a fake speed modulation into a signal used to sanity-check GPS.
@@ -251,7 +250,7 @@ motion. Clever for handheld. For this pipeline it breaks three things at once:
   With AutoBoost that limit is a moving target.
 
 Standard HyperSmooth is a known fixed constant you calibrate once. If a clip is too shaky, fix
-it in post — where you have the full frame *and* the gyro track, strictly more information than
+it in post — where you have the full frame _and_ the gyro track, strictly more information than
 the camera had in the moment.
 
 ### Natural, not Flat — the vision models were not trained on log footage
@@ -270,7 +269,7 @@ one — but a phase-4 refinement, not something to build now.
 
 ### Lock white balance
 
-Auto WB drifts as you pass in and out of tree cover, sometimes *within a single clip*. Three
+Auto WB drifts as you pass in and out of tree cover, sometimes _within a single clip_. Three
 costs: clips from one ride won't match when posted together; the drift is a nuisance variable
 for every vision model; and any "conditions" classification becomes unreliable because the
 camera is compensating for the thing you're trying to detect. 5500K for open daylight, 4000K
@@ -287,13 +286,13 @@ for heavy canopy, switched at the trailhead.
 
 ## Stage 1 — Catalog
 
-| Question | How |
-|---|---|
-| Is it mountain biking? | Telemetry signature (5–40 km/h sustained, high-freq vertical accel, GPS off road network) + VLM over 8–12 sampled frames. Two agreeing signals pass; disagreement flags. |
-| Solo or bikejoring? | Dog detector over sampled frames; >~30% of frames containing a dog → bikejoring. Telemetry corroborates (steadier speed, less pedaling cadence, flatter). |
-| Long enough / enough action? | Duration from container. "Enough action" is a threshold on stage 2's output — don't hard-code a guess here. |
-| **Chest or helmet?** | Now a **binary**, and one feature nails it. Compute camera yaw rate from `CORI` and heading rate from GPS, then correlate over the file. **A chest mount is rigidly coupled to direction of travel** (torso points where the bike points) → high correlation. **A helmet is not** — you look into corners, check your line, glance at the dog → correlation drops, and there is yaw energy at frequencies the bike never produces. Secondary confirmations, both free: mean `GRAV` pitch (chest sits pitched down and sees bars/front wheel; helmet looks level and ahead) and a single VLM frame check for handlebars in the lower third. |
-| Which trail? | Map-match GPS polyline against a local trail cache (OSM `highway=path` + `mtb:scale` via Overpass, optionally merged with Trailforks GPX). Score on Fréchet distance + direction agreement. Degrade to `trail: unknown` with manual assign in the review UI. |
+| Question                     | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Is it mountain biking?       | Telemetry signature (5–40 km/h sustained, high-freq vertical accel, GPS off road network) + VLM over 8–12 sampled frames. Two agreeing signals pass; disagreement flags.                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Solo or bikejoring?          | Dog detector over sampled frames; >~30% of frames containing a dog → bikejoring. Telemetry corroborates (steadier speed, less pedaling cadence, flatter).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Long enough / enough action? | Duration from container. "Enough action" is a threshold on stage 2's output — don't hard-code a guess here.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **Chest or helmet?**         | Now a **binary**, and one feature nails it. Compute camera yaw rate from `CORI` and heading rate from GPS, then correlate over the file. **A chest mount is rigidly coupled to direction of travel** (torso points where the bike points) → high correlation. **A helmet is not** — you look into corners, check your line, glance at the dog → correlation drops, and there is yaw energy at frequencies the bike never produces. Secondary confirmations, both free: mean `GRAV` pitch (chest sits pitched down and sees bars/front wheel; helmet looks level and ahead) and a single VLM frame check for handlebars in the lower third. |
+| Which trail?                 | Map-match GPS polyline against a local trail cache (OSM `highway=path` + `mtb:scale` via Overpass, optionally merged with Trailforks GPX). Score on Fréchet distance + direction agreement. Degrade to `trail: unknown` with manual assign in the review UI.                                                                                                                                                                                                                                                                                                                                                                               |
 
 Also record cheap quality gates: mean luma, lens-obscured detection (frame-difference floor),
 audio wind level. These down-weight rather than reject, and surface as badges in review.
@@ -303,15 +302,15 @@ audio wind level. These down-weight rather than reject, and surface as badges in
 Five sub-scores on a 3 s sliding window, 1 s hop → a 1 Hz time series. Normalize each to 0–1
 by percentile rank against a **corpus-wide calibration table**, not against the file itself.
 
-| Sub-score | Source | Method | w₀ |
-|---|---|---|---|
-| Speed | GPS | 2D ground speed, gated on GPS9 fix and DOP | **0.50** |
-| Turns | GYRO/CORI | Yaw rate in world frame after gravity alignment. Turn events = threshold-crossing zero-crossings. Weight *lateral acceleration* (v × yaw rate) | 0.25 |
-| Roughness | ACCL | RMS of the 5–40 Hz band after removing gravity. Chest and helmet are both body-damped so the correction between them is small — but still calibrate: a helmet reads slightly higher on impacts and slightly lower on sustained chatter | 0.18 |
-| Airtime | ACCL | Freefall detector: \|accel\| within ~0.15 g of zero for >100 ms, then a landing spike. Duration of the null window *is* the airtime, measured | 0.27 |
-| Descent | GPS+GRAV | **Disabled — 0.00.** GoPro altitude cannot support it; see the finding below. Revisit when map-matching can supply trail elevation | 0.00 |
-| **Pull** (bikejoring only) | detector box | Orbit's apparent size gives lead distance. A taut, stretched-out line reads as effort the accelerometer never sees | 0.22* |
-| Flow (cross-check) | proxy frames | Optical-flow magnitude on downscaled frames. Fallback when GPS is dead; also catches "fast through tight trees" | cross |
+| Sub-score                  | Source       | Method                                                                                                                                                                                                                                 | w₀       |
+| -------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| Speed                      | GPS          | 2D ground speed, gated on GPS9 fix and DOP                                                                                                                                                                                             | **0.50** |
+| Turns                      | GYRO/CORI    | Yaw rate in world frame after gravity alignment. Turn events = threshold-crossing zero-crossings. Weight _lateral acceleration_ (v × yaw rate)                                                                                         | 0.25     |
+| Roughness                  | ACCL         | RMS of the 5–40 Hz band after removing gravity. Chest and helmet are both body-damped so the correction between them is small — but still calibrate: a helmet reads slightly higher on impacts and slightly lower on sustained chatter | 0.18     |
+| Airtime                    | ACCL         | Freefall detector: \|accel\| within ~0.15 g of zero for >100 ms, then a landing spike. Duration of the null window _is_ the airtime, measured                                                                                          | 0.27     |
+| Descent                    | GPS+GRAV     | **Disabled — 0.00.** GoPro altitude cannot support it; see the finding below. Revisit when map-matching can supply trail elevation                                                                                                     | 0.00     |
+| **Pull** (bikejoring only) | detector box | Orbit's apparent size gives lead distance. A taut, stretched-out line reads as effort the accelerometer never sees                                                                                                                     | 0.22*    |
+| Flow (cross-check)         | proxy frames | Optical-flow magnitude on downscaled frames. Fallback when GPS is dead; also catches "fast through tight trees"                                                                                                                        | cross    |
 
 The **airtime detector is the cheapest high-value feature in the system** — an unmistakable
 accel signature yielding a measurement (0.61 s of air), not a guess.
@@ -337,7 +336,7 @@ for as long as it existed.
 
 Three separate defences existed and none of them fired, which is the part worth keeping:
 
-- `inventory` checked the *stream list*, one layer above the columns.
+- `inventory` checked the _stream list_, one layer above the columns.
 - `calibrate` skipped features with too few samples, so a feature that was empty everywhere
   vanished from its own report instead of appearing as a zero.
 - `score` renormalized the composite over the features present, so the arithmetic stayed
@@ -350,7 +349,7 @@ what it could not use and why, and `verify` says outright when a GPS stream is p
 columns are not. The general form: a fallback that is right for one stream must not be the
 default for every stream, and a pipeline that degrades gracefully has to say that it degraded.
 
-### Measured — calibration must also bucket on *feature availability*
+### Measured — calibration must also bucket on _feature availability_
 
 Renormalizing the weighted mean over "whatever sub-scores are present" is the obvious way to
 handle a ride shot without GPS, and it is quietly wrong. A mean of two terms is more variable
@@ -361,11 +360,11 @@ simulation with no real difference between the rides at all reproduced exactly t
 six, from features with identical distributions.
 
 The fix is a second ranking. After the level is computed it is percentile-ranked against other
-seconds *carrying the same set of features*, which turns the question from "how high is this
+seconds _carrying the same set of features_, which turns the question from "how high is this
 average" into "how good is this for what we can measure here" — a question that is comparable
 across rides. In the same simulation the gap between the two groups falls from +0.058 to +0.003
 and the top six goes to 3/6, which is what chance looks like. Within a ride the change is
-invisible (Spearman ≈0.998 against the old curve), because it only ever mattered *between*
+invisible (Spearman ≈0.998 against the old curve), because it only ever mattered _between_
 rides.
 
 The general rule this is an instance of: **any calibration key that varies in how much
@@ -382,12 +381,12 @@ specialisation, and **every exciting second is specialised**: fast means
 straight, so a sprint scores near zero on turns; twisty means slow; a rock
 garden is neither fast nor flowing. Scored under the mean:
 
-| second | speed | turn | rough | composite |
-|---|---|---|---|---|
-| sprint | 0.99 | 0.20 | 0.55 | 0.546 |
-| tight switchbacks | 0.30 | 0.97 | 0.50 | 0.626 |
-| rock garden | 0.25 | 0.45 | 0.98 | 0.542 |
-| **briskly consistent, never special** | 0.85 | 0.85 | 0.85 | **0.650** |
+| second                                | speed | turn | rough | composite |
+| ------------------------------------- | ----- | ---- | ----- | --------- |
+| sprint                                | 0.99  | 0.20 | 0.55  | 0.546     |
+| tight switchbacks                     | 0.30  | 0.97 | 0.50  | 0.626     |
+| rock garden                           | 0.25  | 0.45 | 0.98  | 0.542     |
+| **briskly consistent, never special** | 0.85  | 0.85 | 0.85  | **0.650** |
 
 All three memorable seconds lose to the forgettable one. On the real library
 this showed up exactly as "the top rides are the most consistently paced ones
@@ -406,11 +405,11 @@ Two further consequences worth keeping:
   sprint peaks on speed alone, so while speed carried the smallest weight and
   turn the largest, no value of p promoted sprint rides. Weight and sharpness
   are separate knobs and both are taste. Settled at `speed 0.50 / turn 0.30 /
-  rough 0.20`, `SHARPNESS = 8`.
+rough 0.20`, `SHARPNESS = 8`.
 - **"Best clip" and "most good footage" are different questions.** `rank` used
-  the mean of a ride's 30 best seconds taken from *anywhere* in it, which
+  the mean of a ride's 30 best seconds taken from _anywhere_ in it, which
   measures total good footage and favours long even rides. It now also reports
-  the best *contiguous* 12 s — the question stage 3 will actually ask — and
+  the best _contiguous_ 12 s — the question stage 3 will actually ask — and
   sorts on that. Both columns are shown, because where they disagree is
   informative.
 
@@ -429,7 +428,7 @@ falls.
 Tested on ride 0603 against two moments identified from the footage — hard pull
 from 0:41, slack line at 11:55. It fails three ways at once:
 
-- **The slack window reads at the 65th percentile of the ride** — *above* median
+- **The slack window reads at the 65th percentile of the ride** — _above_ median
   stride share. A pull detector must read low where the line is slack.
 - **Stride share correlates −0.585 with chatter share.** Shares sum to one, so
   a band containing nothing periodic simply takes whatever the broadband trail
@@ -438,7 +437,7 @@ from 0:41, slack line at 11:55. It fails three ways at once:
   band power; a fixture with a genuine planted stride tone puts 19.7% in its
   peak — 5.8× more prominent.
 
-The physics agrees in hindsight. A taut line transmits a roughly *steady* force,
+The physics agrees in hindsight. A taut line transmits a roughly _steady_ force,
 and steady force is indistinguishable from a small change in gravity to an
 accelerometer. A slack line transmits nothing. There is no periodic component to
 find, because a bike does not bob at the dog's stride frequency the way a
@@ -455,7 +454,7 @@ Two consequences:
   vision specifically, not for better weights.
 
 The method generalises past this case: two windows compared for a difference are
-only meaningful if they match on everything *except* that difference. The first
+only meaningful if they match on everything _except_ that difference. The first
 attempt compared a pre-ride standstill against a ride (total power 3,939× apart)
 and the second compared a launch-from-standstill against coasting, which
 measured pedalling. Both produced confident-looking band tables. A power-ratio
@@ -498,10 +497,10 @@ genuinely differ, because a chest mount points where the bike points while a hel
 where you look. **Night is a fifth cell handled separately**, since illumination replaces both
 gaze and subject detection as the framing signal.
 
-| | Chest | Helmet |
-|---|---|---|
-| **Solo** | **Near-static crop.** Torso already tracks the bike, so the trail sits near frame center. Hold centered with a slow drift toward the optical-flow focus of expansion. Least work, best result. | **Counter-steer to heading.** Head turns swing the frame off direction of travel. Use `CORI` yaw relative to GPS heading and pan the crop *against* the head turn, so the frame stays on where the bike is going. |
-| **Bikejoring** | **Track the dog.** The dog is ahead and low and drifts laterally; a chest mount won't follow it. Detect per sampled frame, track between detections, drive crop x-center from the box. A box tracker is enough — you need a center, not a mask. | **Follow the gaze — do NOT counter-steer.** You are already looking at the dog, so head yaw *is* the framing signal. The solo/helmet correction would actively fight you and push the dog out of frame. Track the dog as a cross-check, override only when the gaze loses it. |
+|                | Chest                                                                                                                                                                                                                                           | Helmet                                                                                                                                                                                                                                                                        |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Solo**       | **Near-static crop.** Torso already tracks the bike, so the trail sits near frame center. Hold centered with a slow drift toward the optical-flow focus of expansion. Least work, best result.                                                  | **Counter-steer to heading.** Head turns swing the frame off direction of travel. Use `CORI` yaw relative to GPS heading and pan the crop _against_ the head turn, so the frame stays on where the bike is going.                                                             |
+| **Bikejoring** | **Track the dog.** The dog is ahead and low and drifts laterally; a chest mount won't follow it. Detect per sampled frame, track between detections, drive crop x-center from the box. A box tracker is enough — you need a center, not a mask. | **Follow the gaze — do NOT counter-steer.** You are already looking at the dog, so head yaw _is_ the framing signal. The solo/helmet correction would actively fight you and push the dog out of frame. Track the dog as a cross-check, override only when the gaze loses it. |
 
 Helmet + bikejoring is the cell that breaks a naive "always counter-steer head turn"
 implementation. Encode the policy as an explicit lookup on `(style, mount)` rather than a chain
@@ -516,19 +515,78 @@ which is exactly the condition this needs to produce natural motion.
 
 **Horizon leveling is nearly free — but only apply it once.** Gate it on the `IORI` check: if
 the camera's Horizon Lock already leveled the frame, skip it. What remains is a per-clip
-toggle — on some rowdy descents the tilt *is* the point.
+toggle — on some rowdy descents the tilt _is_ the point.
 
-| Output setting | Value | Why |
-|---|---|---|
-| Source mode | 4K60 8:7 | Recommended capture default |
-| Resolution | 1080×1920 | 9:16, Reels native |
-| Container/codec | MP4 · H.264 High | Widest upload compatibility |
-| Frame rate | 30 fps | Conform 60 fps source down; keep 60 only for slow-motion sections |
-| Bitrate | 12–15 Mbps | IG re-encodes toward ~3.5 — give the transcoder headroom |
-| Audio | AAC 128k | GoPro audio is wind. Plan on music, keep an ambient bed low |
-| Duration | 7–20 s | Within the 3 s–3 min window; short end is where retention holds |
-| Safe area | ~250 px top / ~420 px bottom | Clear of caption and action-button overlays |
-| Decode path | VideoToolbox | Hardware HEVC decode on the M4 Max |
+| Output setting  | Value                        | Why                                                               |
+| --------------- | ---------------------------- | ----------------------------------------------------------------- |
+| Source mode     | 4K60 8:7                     | Recommended capture default                                       |
+| Resolution      | 1080×1920                    | 9:16, Reels native                                                |
+| Container/codec | MP4 · H.264 High             | Widest upload compatibility                                       |
+| Frame rate      | 30 fps                       | Conform 60 fps source down; keep 60 only for slow-motion sections |
+| Bitrate         | 12–15 Mbps                   | IG re-encodes toward ~3.5 — give the transcoder headroom          |
+| Audio           | AAC 128k                     | GoPro audio is wind. Plan on music, keep an ambient bed low       |
+| Duration        | 7–20 s                       | Within the 3 s–3 min window; short end is where retention holds   |
+| Safe area       | ~250 px top / ~420 px bottom | Clear of caption and action-button overlays                       |
+| Decode path     | VideoToolbox                 | Hardware HEVC decode on the M4 Max                                |
+
+### Measured — subject framing, built for the chest/bikejoring cell
+
+The cell above says "detect per sampled frame, track between detections, drive crop x-center
+from the box". That is what `track.py` and `reframe.py` do, and four things about doing it
+were not what the plan expected.
+
+**Every source here crops to full height, so there is no vertical decision to make.** The three
+shapes in the library are 5312×2988 (52 files), 3840×3360 (37) and 5312×4648 (8), leaving 3632,
+1950 and 2698 px of horizontal pan. The plan's capture table quoted 3956×3460 and 3840×2160;
+neither shape exists in the library, and the pan-range figures derived from them were for
+footage nobody has.
+
+**Framing the detector matters more than the detector.** On 60 frames of ride 0598, stock COCO
+RF-DETR found the dog in **4** when handed the whole frame squashed to a square, and in **14**
+when handed the band he occupies split into two overlapping tiles — 3.5×, same weights. Going
+up a model size, nano/384 to medium/576, moved it from 12 to 14, a fifth of what the framing
+was worth. The arithmetic is the reason: a dog down the trail is 25–60 px wide in a 960-wide
+proxy, and squashing to 384 leaves 10–24. Cropping to his band and halving it into overlapping
+tiles hands the model a 480-wide piece to fill 576, which is an upscale.
+
+**Most of what a COCO dog detector finds on a chest mount is the rider.** Over 90 s of approved
+footage the geometry was cleanly bimodal: 80 boxes at width 0.04 and area 0.0064 centred at
+cx 0.49 (Orbit), and 20 at width 0.28 and area 0.063, every one touching a left or right frame
+edge (a forearm). Separating them needs no model and no confidence threshold — the priors in
+`track.py` are shapes, not scores.
+
+**The dead-zone solver is not the block coordinate descent it looks like.** Writing
+`psi_d(e) = min over |s| <= d of (e-s)^2` makes the problem jointly convex in `(z, s)` and
+invites alternating the blocks. Each step really is exact and the objective really does
+decrease — and it is unusably slow, because the path-step's right-hand side collapses to
+`w*dt*z_old`. On a planted half-band step whose correct answer is a flat line costing zero:
+objective 2.0e-5 after 24 iterations, 4.4e-6 after 500, 6.3e-9 after 8000. Every run returned a
+smooth, plausible path; the 24-iteration one had followed a step it was supposed to ignore.
+Outside the band the penalty is exactly a quadratic centred on the band edge, so the right
+algorithm is semismooth Newton on the active set — two iterations, exact, one banded solve
+each. The band also needs a small anchor or the problem is degenerate: a constant offset inside
+it costs nothing in any term, so the minimiser is not unique.
+
+**The smoothness weights want to be small, which is backwards from the intuition.** The dead
+zone is what provides the stillness; the smoothness terms only round the corners at its edges.
+Weighted hard they fight the band instead — at `lam_v` 3, `lam_a` 12 the crop never reached the
+aim at all and slid for a whole clip, because spreading an eventual return to centre over eight
+seconds cost 0.04 in velocity while leaving the subject early cost 0.0007 in tracking. At
+0.02/0.01 a planted steady dog holds at 0.000 crop widths/s. `lam_a` is very nearly inert
+across two orders of magnitude — the curvature it exists to penalise is absorbed by the band.
+
+**What it is worth is the tail, not the median.** Across ride 0598's six approved clips, the
+median distance from Orbit to the crop's centre is unchanged at 0.11 crop widths — a rider
+following a dog already points at him, and the measured box centres sit at cx 0.49. What
+changes is the 95th percentile, **0.52 to 0.26**, and the share of sightings where he is
+outside the crop altogether, **7% to 1%**. Subject framing does not improve the typical second.
+It rescues the ones where a centre crop had lost him.
+
+**The detector is the honest weak point, and the fine-tune is still the fix.** Hit rates run
+21–32% of sampled frames on 0598. Precision is high once the priors run; recall is what is
+missing, and it is missing because of pixels on the dog rather than anything about the model.
+The plan's arc — bootstrap labels, fine-tune RF-DETR on ~200 frames of Orbit — is unchanged,
+and the pipeline now in place is what makes harvesting those labels cheap.
 
 ### Measured — levelling, and what a synthetic test cannot refute
 
@@ -537,24 +595,24 @@ phase 0 measured roll suppression at **+0.11**, so the camera did not level in b
 the tilt took three attempts, and the second one is the interesting failure.
 
 **The arc-fitting version was elegant and wrong.** Rolling rotates gravity about the optical
-axis, so gravity traces an arc whose plane normal *is* that axis — an SVD finds it without
+axis, so gravity traces an arc whose plane normal _is_ that axis — an SVD finds it without
 naming a single axis, which is exactly what you want from a camera whose axis conventions have
 already been wrong twice here. On planted telemetry it recovered a 4.0° offset as **4.00° with
 correlation 1.000, under every axis order**. On a real ride it reported a constant of **−1536°**
 and a swing of 3957°.
 
-Gravity vectors are *unit* vectors. They have no radial variation, so their direction of least
+Gravity vectors are _unit_ vectors. They have no radial variation, so their direction of least
 variance is always their own mean — not the optical axis. On the real ride `mean_gravity ·
 normal` came out **−0.978**: the SVD had handed back the gravity direction. It only looked
 right in the test because the test planted roll and nothing else, which makes the arc exactly
-planar. Real riding pitches as well as rolls, so gravity wanders over a *patch* of the sphere
+planar. Real riding pitches as well as rolls, so gravity wanders over a _patch_ of the sphere
 and there is no plane to find — the singular values say so plainly, 11.8 / 10.6 / 2.6 rather
 than two-and-a-remainder.
 
 **A synthetic test can only refute the errors its generator can express.** That one planted
 roll alone, so it could prove axis-order invariance and was structurally blind to the planarity
 assumption underneath it. The generator now plants pitch, suppression, and reversed handedness
-as well — but the general lesson is that a passing synthetic test bounds the *model*, not the
+as well — but the general lesson is that a passing synthetic test bounds the _model_, not the
 world, and the first contact with real data is the actual test.
 
 **What replaced it: the optical axis is chosen by fit, not derived.** Each of the three axes is
@@ -565,12 +623,12 @@ visible in the frames. The axis that matches the picture wins. On every real rid
 The regression's slope then carries something no axis assignment could: **how much of the
 body's roll actually reaches the picture.**
 
-| Ride | Optical axis | Gain | Corr | Body swing | Visible swing | Constant offset |
-|---|---|---|---|---|---|---|
-| 9f1ea3a2 | 2 | 0.14 | 0.36 | 25.7° | 3.6° | +0.3° |
-| 4b57c2c8 | 2 | 0.42 | 0.67 | 25.8° | 11.0° | −0.9° |
-| e382330d | 2 | 0.12 | 0.38 | 23.5° | 2.9° | −0.4° |
-| **0603** (16:9) | — | — | **0.12** | 34° | — | −1.0° |
+| Ride            | Optical axis | Gain | Corr     | Body swing | Visible swing | Constant offset |
+| --------------- | ------------ | ---- | -------- | ---------- | ------------- | --------------- |
+| 9f1ea3a2        | 2            | 0.14 | 0.36     | 25.7°      | 3.6°          | +0.3°           |
+| 4b57c2c8        | 2            | 0.42 | 0.67     | 25.8°      | 11.0°         | −0.9°           |
+| e382330d        | 2            | 0.12 | 0.38     | 23.5°      | 2.9°          | −0.4°           |
+| **0603** (16:9) | —            | —    | **0.12** | 34°        | —             | −1.0°           |
 
 Two consequences. **The mount is square** — the constant offset is under a degree on all three,
 so constant levelling has nothing to do and the default is `none`. And **the camera already
@@ -578,7 +636,7 @@ removes most of the dynamic roll**, between 58% and 88% of it, so feeding raw bo
 first ride would have overcorrected it sevenfold.
 
 That last number appears to contradict phase 0's +0.11 suppression, and does not. Phase 0
-compared a *steady* 13.2° body tilt against 11.7° on screen; a constant offset is precisely
+compared a _steady_ 13.2° body tilt against 11.7° on screen; a constant offset is precisely
 what stabilisation passes through, and the dynamic swing is what it removes. Both measurements
 are right about different quantities.
 
@@ -589,18 +647,18 @@ central-difference gradient is only accurate well below Nyquist, and on raw fram
 orientations toward the diagonal, amplifying small tilts. Rotating real frames by known angles
 and reading the shift back: **1.244× at 480 px wide, 1.545× at 240** — a bias invisible to any
 correlation, which would have overcorrected every clip by a quarter. With a σ = 1 low-pass
-first: **0.970 at 480 px and 0.973 at 240**. Near unity *and stable across scale*, which is
+first: **0.970 at 480 px and 0.973 at 240**. Near unity _and stable across scale_, which is
 what distinguishes a band-limited estimator from a tuned constant.
 
 **What a rotation costs.** The crop shrinks by exactly what the applied angle demands, computed
 after the angle is known, so an unlevelled clip loses nothing:
 
-| Source | Crop | Max angle before the crop drops under 1080 wide |
-|---|---|---|
-| 8:7 4K | 1946×3460 | 25.0° (the clamp, not the limit) |
-| 8:7 5.3K | 2614×4648 | 25.0° |
-| 16:9 4K | 1214×2160 | **17.8°** |
-| 16:9 5.3K | 1680×2988 | 25.0° |
+| Source    | Crop      | Max angle before the crop drops under 1080 wide |
+| --------- | --------- | ----------------------------------------------- |
+| 8:7 4K    | 1946×3460 | 25.0° (the clamp, not the limit)                |
+| 8:7 5.3K  | 2614×4648 | 25.0°                                           |
+| 16:9 4K   | 1214×2160 | **17.8°**                                       |
+| 16:9 5.3K | 1680×2988 | 25.0°                                           |
 
 Past that the render would be upscaling, which is worse than a tilt, so the angle is clamped
 and the clamp is reported.
@@ -615,11 +673,11 @@ second stale, and at the 14 °/s a corner reaches that is 1.4° of lag — measu
 still in the picture. At 50 Hz, sampled mid-step, it comes out flat.
 
 **Some rides have no dynamic fit at all, and that is a finding rather than a failure.** Ride
-0603 rolls 34° at the body and its picture will not line up with that at *any* lag — best
+0603 rolls 34° at the body and its picture will not line up with that at _any_ lag — best
 |corr| 0.26 over a ±60 s scan, and the sign flips between quarters of the ride (−0.36, +0.06,
 +0.15, −0.43). Nothing about timing explains it; the roll does not reach the frame.
 
-What cannot be established is *why*. The camera may have removed it, or the scenery's own lean
+What cannot be established is _why_. The camera may have removed it, or the scenery's own lean
 may be drowning it — and those are not separable from here, because leaning trees and trail
 camber scatter the frames by about as much as a passed-through roll does. 0603 shows 10.0° of
 visible tilt; 4b57c2c8, which genuinely passes roll through, shows 10.8°. A first draft of the
@@ -632,9 +690,117 @@ removes how the camera sits on the strap, which is the median tilt the frames sh
 no gain involved. So it stays available on rides whose dynamic fit is refused, and only dynamic
 requires the correlation to hold.
 
-**Constant is a no-op here and dynamic is a choice.** On a bike the lean *is* the riding — the
+**Constant is a no-op here and dynamic is a choice.** On a bike the lean _is_ the riding — the
 plan's "on some rowdy descents the tilt is the point" was right — and with only 3–11° of
 visible swing left after HyperSmooth, there is less to remove than there first appeared.
+
+### Measured — `-noautorotate` stopped working, and 77 of 97 files rendered upside down
+
+Stage 5 turns autorotation off and applies the rotation itself, because the container is not a
+source this pipeline trusts. On **ffmpeg 9.0.1 the flag that does that does nothing at all.**
+Measured on a 640x360 clip whose coded frame is black at the top and white at the bottom, under a
+180 display matrix — upright means the white ends up on top:
+
+| input flags           | result          |                    |
+| --------------------- | --------------- | ------------------ |
+| none                  | white at top    | matrix applied     |
+| `-noautorotate`       | white at top    | matrix applied     |
+| `-autorotate 0`       | white at top    | matrix applied     |
+| `-display_rotation 0` | white at bottom | the coded frame    |
+
+Both `-vf` and `-filter_complex` behave identically, so it is not the filtergraph quirk the
+original comment guessed at. With the flag believed, `clip` applied its own 180 on top of
+ffmpeg's: **every file declaring a 180 matrix came out upside down — 77 of 97, every
+chest-mounted ride.** The 20 helmet files declare 0 and were fine, which is exactly why it read
+as intermittent rather than as a bug.
+
+The fix is not "use the other flag", because that is the same mistake with a different string.
+`render.decode_flags()` plants a known frame under a known matrix, decodes it back with the flags
+it is about to use for real, and looks — once per process. `orient_selftest.py` asserts the
+answer, so the day this changes again it is a failing check rather than a reel.
+
+**Compensating was tried and rejected.** If the decoder cannot be stopped, the arithmetic
+alternative is to subtract what it already applied — but that means trusting the container's
+number, and GX010600 is the file that gives three of them (matrix 90, legacy tag 270, 180 at
+ingest). Compensation renders it upside down, measured. So a build that cannot deliver the coded
+frame renders files declaring 0 and **refuses** the rest with an error naming the ffmpeg version
+that works. Refusing is loud; a wrong reel is not.
+
+### Measured — a joined cut is where the frame rates collide, and the collision is silent
+
+`render` groups by ride, and within a ride the frame rate is constant, so the question never
+came up. `cut` joins across rides, and this library is **52 rides at 29.97 fps and 37 at
+59.94** — a hand-made post mixing them is the normal case, not the exotic one.
+
+Stream-copying two rates together does not fail. It does not come out short either, which is
+what the first version of the check tested and why that check passed on a broken file. Measured
+on two synthetic two-second parts at 30 and 60: **180 frames over 4.02 s, in a file declaring
+60 fps and averaging 45** — sixty frames 33 ms apart, then 119 at 16.7 ms. Right duration, right
+codec, right dimensions, variable frame rate. Nothing local says otherwise; what happens to it is
+decided by Instagram's re-encode on somebody's phone.
+
+So the rate is settled **before** anything is encoded — every part of a joined cut renders at one
+rate — and `compile_reel` refuses to stream-copy parts that disagree, rather than measuring the
+result afterwards. The planted check is now the pacing, not the length
+(`tools/cut_selftest.py`).
+
+**This revises the output table above on one line.** That table says "conform 60 fps source down;
+keep 60 only for slow-motion sections". `render` has never actually set an output rate, so a
+59.94 ride already renders standalone at 59.94 today — and conforming a joined cut down to 30
+would make the same clip look different depending on what it was joined to. The default is
+therefore the *fastest* clip in the cut, and conforming down is the other item in the dropdown.
+The plan's reasoning is not wrong, it is a preference, so the UI asks instead of deciding.
+
+### The queue is a table, because the work is minutes and the browser is a tab
+
+A 30-second clip cut from a 5.3K HEVC original is most of a minute of decode — the trim lives
+inside the filter graph (`-ss` binds to the wrong input when there is more than one, which once
+produced a reel twelve times too long that reported success), so ffmpeg reads from the start of
+the file to reach the in-point. A four-clip cut is a coffee. Anything that long cannot live in
+the page, and a queue held in the server's memory is lost to a reload.
+
+Three consequences worth recording:
+
+- **Cancel is polled on a watchdog, not on progress.** `-progress pipe:1` reports output seconds,
+  and during that decode-to-the-in-point phase there are no output seconds — 757 s into a ride
+  that is two minutes of total silence. Cancelling against progress lines therefore did nothing
+  during exactly the phase you would want to cancel in. A thread asking every 0.25 s does not
+  care. Ctrl-C uses the same path: measured at 0.7 s from stop to no ffmpeg running.
+- **A cancelled job deletes what it wrote.** A killed encoder leaves a truncated mp4 with the
+  right name in the right folder, playable for two seconds. That is a thing that gets posted.
+- **`cut` never touches `segment`.** A rendered clip stays `approved`. `fit` trains on
+  `approved`, so moving it to `rendered` would shrink the training set every time you posted
+  something — the schema has offered that status since the beginning and nothing should take it.
+
+### The shelf, and the one place this system leaves loopback
+
+Everything else binds 127.0.0.1 on principle. `shelf` cannot: a QR code pointing at loopback
+points the phone at itself, and the entire job is handing a file to a different device. So the
+reversal is deliberate and bounded four ways — one interface (the LAN address, never `0.0.0.0`,
+so loopback is not even listening), a per-run random token on every path that is never written to
+disk, a resolved-path check confining reads to `$ORBITCUT_ROOT/renders`, and no endpoint that
+writes anything. `--local-only` declines the LAN and prints no codes.
+
+The trade is honest rather than eliminated: it is your footage on your wifi, which at home is the
+point and in a café is not.
+
+**The QR encoder is in-tree, and that decision earned its keep by being wrong three times.** The
+format has not moved since 2000, so it is a frozen problem rather than a maintenance one, and a
+dependency for one screen is a dependency the install has to carry on the Linux desktop too. What
+made it viable is that it is checkable: `segno` for bit-exact matrices and `zxing-cpp` for
+decoding, both in a throwaway environment, neither shipped. The bugs it caught, in order:
+
+  * format bits placed LSB-first. Eleven of the fifteen are palindromic, so exactly four modules
+    moved and the symbol looked immaculate. Nothing on earth could read it.
+  * eight format bits down the column and seven along the row instead of seven and eight, the
+    spare one landing on the module the spec fixes dark forever.
+  * the format words for masks 4-7, typed in from a table that turned out to be wrong. The fix
+    was to stop using a table: a format word is a BCH codeword, and divisibility checks itself.
+
+Worth recording because it will mislead someone later: **OpenCV's QR decoder rejects some
+perfectly valid symbols**, including segno's own output at certain masks, so it is not a usable
+oracle. zxing-cpp reads all 213 payload lengths. And mask selection is a robustness heuristic, not
+correctness — segno, zxing and this file all choose differently and all three are right.
 
 ## Variant — night rides
 
@@ -651,14 +817,14 @@ footage — not true of any vision-first design.
 
 ### Detecting it — three signals, no model
 
-| Signal | Source | Method |
-|---|---|---|
-| **Solar elevation** | GPS + clock | You have lat, lon, and a UTC timestamp in the GPS stream, and solar position is a closed-form function of those three. `astral.sun.elevation()` gives the sun's angle above the horizon: >0° day, 0 to −6° civil twilight, <−6° night. Exact, free, correct at every latitude and season — which "was it after 8pm" is not |
-| **Exposure response** | ISOE + SHUT | The camera's own reaction to the scene. On a night ride ISO sits pinned near its ceiling and shutter at its longest. The camera telling you how dark it was, for free |
-| **Mean luma** | proxy frames | Sampled frame brightness, plus its *variance across the frame* — a lit trail at night is a bright pool inside a black surround, a histogram nothing in daylight resembles |
+| Signal                | Source       | Method                                                                                                                                                                                                                                                                                                                     |
+| --------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Solar elevation**   | GPS + clock  | You have lat, lon, and a UTC timestamp in the GPS stream, and solar position is a closed-form function of those three. `astral.sun.elevation()` gives the sun's angle above the horizon: >0° day, 0 to −6° civil twilight, <−6° night. Exact, free, correct at every latitude and season — which "was it after 8pm" is not |
+| **Exposure response** | ISOE + SHUT  | The camera's own reaction to the scene. On a night ride ISO sits pinned near its ceiling and shutter at its longest. The camera telling you how dark it was, for free                                                                                                                                                      |
+| **Mean luma**         | proxy frames | Sampled frame brightness, plus its _variance across the frame_ — a lit trail at night is a bright pool inside a black surround, a histogram nothing in daylight resembles                                                                                                                                                  |
 
 Fuse to `lighting ∈ {day, twilight, night}` on the classification record. Disagreement is the
-interesting output: solar elevation saying *day* while ISO sits pinned means dense canopy, a
+interesting output: solar elevation saying _day_ while ISO sits pinned means dense canopy, a
 muddy lens, or a camera that spent the ride in a pack.
 
 ### Measured — the lighting labels were wrong twice over, and the night path has never run
@@ -674,7 +840,7 @@ fiction. GPS9 carries true UTC and always did. `orbitcut retime` repairs the rec
 parquets without re-ingesting anything.
 
 **And the exposure fallback was guessing anyway.** Under 400 ISO it said day, over 1600 night, and
-between them *twilight* — but this document already said dense canopy at midday and open sky at
+between them _twilight_ — but this document already said dense canopy at midday and open sky at
 dusk land in the same band. Against ground truth it was wrong 39 times out of 76. With no night
 footage at all to place those thresholds against, placing them was never a measurement. It now
 returns `day` when the frame is bright and `unknown` otherwise: bright is something the camera can
@@ -688,21 +854,21 @@ before it.
 
 ### What survives the dark, and what breaks
 
-| Component | At night | Handling |
-|---|---|---|
-| Speed / turns / roughness / airtime / descent | **unaffected** | Sensors don't care about photons. No change |
-| Optical-flow cross-check | **DISABLE** | Not down-weight — switch off. A helmet light sweeping across terrain produces apparent motion the flow estimator reads as real. That's a systematic error correlated with head movement, not noise, and averaging it in corrupts the signal you use to sanity-check GPS |
-| Is-it-MTB classification | **discount** | SigLIP embeddings on a near-black frame are unreliable. Telemetry already answers this; skip the vision vote rather than trusting a low-confidence one |
-| Dog detection | **pool only** | Works inside the illuminated region and nowhere else. See harness light below |
-| Mount classification | **prior** | Always chest at night. Use as a strong prior — but keep running the classifier so the day you change setup the system notices instead of silently mislabeling |
-| Style classification | **prior** | Night usually means Orbit is along, so bikejoring is the prior. Prior, not hard-code — the retroreflective test confirms it directly and cheaply |
+| Component                                     | At night       | Handling                                                                                                                                                                                                                                                                |
+| --------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Speed / turns / roughness / airtime / descent | **unaffected** | Sensors don't care about photons. No change                                                                                                                                                                                                                             |
+| Optical-flow cross-check                      | **DISABLE**    | Not down-weight — switch off. A helmet light sweeping across terrain produces apparent motion the flow estimator reads as real. That's a systematic error correlated with head movement, not noise, and averaging it in corrupts the signal you use to sanity-check GPS |
+| Is-it-MTB classification                      | **discount**   | SigLIP embeddings on a near-black frame are unreliable. Telemetry already answers this; skip the vision vote rather than trusting a low-confidence one                                                                                                                  |
+| Dog detection                                 | **pool only**  | Works inside the illuminated region and nowhere else. See harness light below                                                                                                                                                                                           |
+| Mount classification                          | **prior**      | Always chest at night. Use as a strong prior — but keep running the classifier so the day you change setup the system notices instead of silently mislabeling                                                                                                           |
+| Style classification                          | **prior**      | Night usually means Orbit is along, so bikejoring is the prior. Prior, not hard-code — the retroreflective test confirms it directly and cheaply                                                                                                                        |
 
 ### The helmet light is a gaze signal you can see in frame
 
 Your chest camera is fixed to direction of travel, and the bar light illuminates that same
 direction. But the **helmet light moves with your head**, so the chest camera records a bright
 pool tracking exactly where you're looking. That's the same gaze information the daytime
-helmet-mount case gets from `CORI` — except here it's *visible in the image*, on a camera with
+helmet-mount case gets from `CORI` — except here it's _visible in the image_, on a camera with
 no head-turn problem of its own.
 
 So the night reframing target isn't a model output. It's a luma threshold and a centroid: find
@@ -719,8 +885,8 @@ the fixed pool; what's left is your gaze.
 
 - **Night gets its own calibration bucket.** Add `lighting` to the calibration key alongside
   style and mount. Night riding is slower and more cautious by nature; percentile-normalizing
-  night footage against a day-dominated corpus means *no night clip ever clears the selection
-  threshold*. Silent failure — the pipeline would appear to work while quietly deciding you
+  night footage against a day-dominated corpus means _no night clip ever clears the selection
+  threshold_. Silent failure — the pipeline would appear to work while quietly deciding you
   never ride well after dark.
 - **Clip selection gains an illumination gate — the first time vision overrules telemetry.** A
   clip whose peak action happens outside the light pool is unpublishable no matter what the
@@ -777,13 +943,13 @@ the sensor. Against a near-black frame, the harness should be the brightest satu
 a wide margin.
 
 Night detection is therefore a threshold, not a model — specifically a **two-signal threshold**:
-a high-luma blob *with* orange chroma at its edges. Match on both rather than hue alone, because
+a high-luma blob _with_ orange chroma at its edges. Match on both rather than hue alone, because
 near-coaxial retroreflection is intense enough that the blob's core will often clip to white and
 lose its colour entirely. The orange survives in the fringe. Bright core + orange fringe is far
 more specific than either test alone, and it's a handful of numpy ops per frame.
 
 **The geometry has a lucky failure mode.** Observation angle is set by light-to-camera separation
-divided by distance to target, so it *widens as Orbit closes and narrows as he pulls ahead*:
+divided by distance to target, so it _widens as Orbit closes and narrows as he pulls ahead_:
 roughly 5° at a 5 m lead, roughly 15° at 1.5 m. The return is strongest exactly when he is
 stretched out in front — which is the shot worth keeping.
 
@@ -796,8 +962,8 @@ than one model straining across both regimes, and the night path needs no traini
 ### Night collapses the reframe matrix — and adds a sub-score
 
 If night rides are usually bikejoring, night is effectively **one cell**: chest mount,
-bikejoring, dog trackable. The policy is *crop toward Orbit's harness, fall back to the
-light-pool centroid when he's out of the beam or occluded* — and those two targets agree most of
+bikejoring, dog trackable. The policy is _crop toward Orbit's harness, fall back to the
+light-pool centroid when he's out of the beam or occluded_ — and those two targets agree most of
 the time, since he's generally in the light you're pointing at the trail.
 
 More interesting: the harness box gives a **lead-distance signal**. Apparent height in pixels
@@ -806,16 +972,16 @@ line or loping along close in. That's a bikejoring-specific axis of "action" non
 sub-scores capture — a hard pull with the dog well out front looks completely different from the
 same speed with a slack line. Worth adding as a **style-conditional sixth sub-score** (`Pull`),
 active only when `style = bikejoring`, and it works by day too once the detector produces boxes.
-Use apparent *size* not brightness for the distance estimate: brightness confounds with the
+Use apparent _size_ not brightness for the distance estimate: brightness confounds with the
 observation-angle effect above and would double-count.
 
 ## Where agents actually belong
 
-| Kind | Which work | Why |
-|---|---|---|
-| **Deterministic** | Telemetry parse, all sub-scores, clip selection, crop-path optimization, ffmpeg render, map matching, **chest/helmet classification** | Testable, reproducible, free, fast |
-| **Model call** | Is-it-MTB, dog detection, handlebar frame check, trail-region segmentation | Bounded, single-purpose, cached by content hash. Function calls that use a model — no tool loop, no autonomy |
-| **True agent** | **Triage supervisor** (reconcile contradicting signals, escalate vs proceed), **caption writer**, **librarian** (natural-language queries over the catalog) | Judgment over ambiguous open-ended input; benefits from tool use and multi-step reasoning |
+| Kind              | Which work                                                                                                                                                  | Why                                                                                                          |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Deterministic** | Telemetry parse, all sub-scores, clip selection, crop-path optimization, ffmpeg render, map matching, **chest/helmet classification**                       | Testable, reproducible, free, fast                                                                           |
+| **Model call**    | Is-it-MTB, dog detection, handlebar frame check, trail-region segmentation                                                                                  | Bounded, single-purpose, cached by content hash. Function calls that use a model — no tool loop, no autonomy |
+| **True agent**    | **Triage supervisor** (reconcile contradicting signals, escalate vs proceed), **caption writer**, **librarian** (natural-language queries over the catalog) | Judgment over ambiguous open-ended input; benefits from tool use and multi-step reasoning                    |
 
 The failure mode of this kind of project is wrapping deterministic signal processing in an LLM
 and inheriting non-determinism, cost and latency for nothing.
@@ -843,7 +1009,7 @@ That's the shape you want: **the LLM appears three times in a run, not three tho
 Mechanics:
 
 - **The human gate is LangGraph's best feature here.** `interrupt()` + a Postgres checkpointer
-  *is* stage 4: the thread pauses mid-graph, persists, and survives a reboot or a week of not
+  _is_ stage 4: the thread pauses mid-graph, persists, and survives a reboot or a week of not
   getting to it. The review UI resumes with `Command(resume=…)`. You already have Postgres —
   use `AsyncPostgresSaver`, don't stand up anything new.
 - **Set `durability="sync"` and stop thinking about it.** The three modes (`exit` / `async` /
@@ -867,17 +1033,17 @@ Organizing principle: **vision is high-volume and low-judgment; reasoning is low
 high-judgment.** Vision runs locally on models you own and can fine-tune. Reasoning goes to an
 API where quality matters and call count is small enough that cost never becomes a factor.
 
-| Node | Model | Runs on | Why this one |
-|---|---|---|---|
-| **ingest** / parse / proxy | none | M4 Max | ffmpeg + a GPMF parser. No model belongs here |
-| **mount** chest/helmet | none | M4 Max | Telemetry correlation. A model here would be slower *and* worse |
-| **scene classify** (is-it-MTB, conditions, terrain) | **SigLIP 2 + logistic head**; bootstrap with **Qwen3-VL-8B** (MLX, 4-bit, ~6 GB) | M4 Max | Embed once, classify with a head trained on your own frames — ~10 ms/frame, deterministic, free. Use the VLM as the *labeler* for the first ~200 frames, then retire it from the hot path; keep it for open-ended questions |
-| **dog detect** | **RF-DETR Nano or Small, fine-tuned**; bootstrap with **Grounding DINO** or **Moondream 3** | M4 Max (train: MPS or the 2060) | You have *one* dog. A fine-tune on 200 frames of that dog will crush a generic COCO "dog" class at distance, in motion blur, half-occluded by brush — i.e. every frame that matters. RF-DETR is Apache 2.0 and transfers well from few labels; YOLO26 is faster on CPU but AGPL-3.0 |
-| **track** | **ByteTrack** (not SAM 2) | M4 Max | You need a crop center, not a mask. Segmentation is a large bill for information you throw away |
-| **score** / **cut** | none | M4 Max | numpy + scipy. Later a gradient-boosted tree on the decision log — still not an LLM |
-| **triage supervisor** | **Claude Sonnet 5** (`claude-sonnet-5`); Haiku 4.5 if volume grows | API | Judgment over contradicting structured evidence plus a few frames. Once per file |
-| **caption writer** | **Claude Sonnet 5** | API | Once per approved clip. Few-shot with your own past captions — the job is your voice, not general fluency |
-| **librarian** | **Claude Sonnet 5**; Opus 5 only if queries get hard | API | Multi-step tool use over SQL. Ad hoc, interactive, the one place latency is felt directly |
+| Node                                                | Model                                                                                       | Runs on                         | Why this one                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **ingest** / parse / proxy                          | none                                                                                        | M4 Max                          | ffmpeg + a GPMF parser. No model belongs here                                                                                                                                                                                                                                       |
+| **mount** chest/helmet                              | none                                                                                        | M4 Max                          | Telemetry correlation. A model here would be slower _and_ worse                                                                                                                                                                                                                     |
+| **scene classify** (is-it-MTB, conditions, terrain) | **SigLIP 2 + logistic head**; bootstrap with **Qwen3-VL-8B** (MLX, 4-bit, ~6 GB)            | M4 Max                          | Embed once, classify with a head trained on your own frames — ~10 ms/frame, deterministic, free. Use the VLM as the _labeler_ for the first ~200 frames, then retire it from the hot path; keep it for open-ended questions                                                         |
+| **dog detect**                                      | **RF-DETR Nano or Small, fine-tuned**; bootstrap with **Grounding DINO** or **Moondream 3** | M4 Max (train: MPS or the 2060) | You have _one_ dog. A fine-tune on 200 frames of that dog will crush a generic COCO "dog" class at distance, in motion blur, half-occluded by brush — i.e. every frame that matters. RF-DETR is Apache 2.0 and transfers well from few labels; YOLO26 is faster on CPU but AGPL-3.0 |
+| **track**                                           | **ByteTrack** (not SAM 2)                                                                   | M4 Max                          | You need a crop center, not a mask. Segmentation is a large bill for information you throw away                                                                                                                                                                                     |
+| **score** / **cut**                                 | none                                                                                        | M4 Max                          | numpy + scipy. Later a gradient-boosted tree on the decision log — still not an LLM                                                                                                                                                                                                 |
+| **triage supervisor**                               | **Claude Sonnet 5** (`claude-sonnet-5`); Haiku 4.5 if volume grows                          | API                             | Judgment over contradicting structured evidence plus a few frames. Once per file                                                                                                                                                                                                    |
+| **caption writer**                                  | **Claude Sonnet 5**                                                                         | API                             | Once per approved clip. Few-shot with your own past captions — the job is your voice, not general fluency                                                                                                                                                                           |
+| **librarian**                                       | **Claude Sonnet 5**; Opus 5 only if queries get hard                                        | API                             | Multi-step tool use over SQL. Ad hoc, interactive, the one place latency is felt directly                                                                                                                                                                                           |
 
 **The API bill is not a factor.** A ride of four files → twelve candidates → four approvals is
 roughly four triage calls and four caption calls. At Sonnet 5 rates ($2/M in, $10/M out) that's
@@ -911,11 +1077,11 @@ So the machines sort by what they're actually good at. A Ryzen 3700X with 16 GB 
 disk space, which is exactly what an archive wants. **Process on the laptop, archive to the
 desktop as the pipeline's final stage.**
 
-| Machine | Role | Holds | Runs |
-|---|---|---|---|
-| **M4 Max** | The pipeline | All derived data, permanently | Card offload, ingest, scoring, review UI, vision, render. Everything |
-| **Desktop** (Linux · 3700X · 2060 · big disk) | Cold archive | Originals, after render | A Samba share and a verification script. Optionally the RF-DETR fine-tune — a batch job, not a pipeline stage |
-| **ThinkPad** | Still nothing | — | The portability test, once |
+| Machine                                       | Role          | Holds                         | Runs                                                                                                          |
+| --------------------------------------------- | ------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **M4 Max**                                    | The pipeline  | All derived data, permanently | Card offload, ingest, scoring, review UI, vision, render. Everything                                          |
+| **Desktop** (Linux · 3700X · 2060 · big disk) | Cold archive  | Originals, after render       | A Samba share and a verification script. Optionally the RF-DETR fine-tune — a batch job, not a pipeline stage |
+| **ThinkPad**                                  | Still nothing | —                             | The portability test, once                                                                                    |
 
 **Durable execution means the laptop is allowed to sleep.** v0.8 argued the review UI belonged on
 an always-on machine so a paused LangGraph thread wouldn't sit inside a closed laptop. Weaker than
@@ -942,12 +1108,12 @@ you'd least want to find out.
 
 ### The working set, and why the round trip is fine
 
-| What | Size per file | Lives | Moves |
-|---|---|---|---|
-| Original | 10–15 GB | laptop briefly, then desktop forever | once, after render — 3–4 min over gigabit |
-| Proxy | ~50 MB | laptop, permanently | never |
-| Telemetry | ~5 MB | laptop, permanently | never |
-| Renders | ~30 MB | laptop, permanently | to Instagram |
+| What      | Size per file | Lives                                | Moves                                     |
+| --------- | ------------- | ------------------------------------ | ----------------------------------------- |
+| Original  | 10–15 GB      | laptop briefly, then desktop forever | once, after render — 3–4 min over gigabit |
+| Proxy     | ~50 MB        | laptop, permanently                  | never                                     |
+| Telemetry | ~5 MB         | laptop, permanently                  | never                                     |
+| Renders   | ~30 MB        | laptop, permanently                  | to Instagram                              |
 
 A hundred rides of proxies and telemetry is roughly five gigabytes — it sits on the laptop
 indefinitely without you noticing. That's what makes this work: **every reprocessing job except
@@ -963,7 +1129,7 @@ answer flips back to offloading on the desktop.
 
 ### Hardware notes worth having
 
-- **Turing NVDEC does support HEVC Main 10**, which is what the HERO11 records. The desktop *could*
+- **Turing NVDEC does support HEVC Main 10**, which is what the HERO11 records. The desktop _could_
   ingest if you wanted — the fallback exists and isn't a compromise. Keep hardware decode a config
   value (`videotoolbox` / `cuda` / software) and both machines stay capable.
 - **6 GB of VRAM picks your detector size.** Roboflow recommends 8 GB for RF-DETR fine-tuning and
@@ -1009,16 +1175,17 @@ everything else. The trigger is a backlog, not the existence of three computers.
 
 ## Data model
 
-| Table | Key fields | Notes |
-|---|---|---|
-| `asset` | content_hash, path, host, camera_model, duration, fps, resolution, aspect, codec, recorded_at, stabilization, horizon_locked, fov | horizon_locked derived from IORI at ingest |
-| `telemetry` | asset_id, parquet_path, streams_present, sample_rates | Pointer not blob. 10 Hz resampled for scoring + raw high-rate ACCL/GYRO for airtime |
-| `classification` | asset_id, stage_version, is_mtb+conf, style, mount, **lighting**, trail_id+conf, quality_flags | mount ∈ {chest, helmet}; lighting ∈ {day, twilight, night} |
-| `score_series` | asset_id, t, speed, turn, rough, air, descent, flow, composite | 1 Hz; what the review UI draws |
-| `segment` | asset_id, t_in, t_out, features (jsonb), dominant_type, **subject**, rank, status | candidate → approved/rejected → rendered. `subject` names who's in it — `orbit`, not `dog_detected`, so the librarian answers questions the way you'd ask them |
-| `decision` | segment_id, action, adjusted_in, adjusted_out, reason_chips, decided_at | **The training log.** Append-only |
-| `render` | segment_id, preset, crop_path (jsonb), out_path, status, rendered_at | Crop path stored so a preset tweak doesn't redo tracking |
-| `trail` | id, name, geometry, region, source, difficulty | Local cache from OSM/Trailforks |
+| Table            | Key fields                                                                                                                        | Notes                                                                                                                                                          |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `asset`          | content_hash, path, host, camera_model, duration, fps, resolution, aspect, codec, recorded_at, stabilization, horizon_locked, fov | horizon_locked derived from IORI at ingest                                                                                                                     |
+| `telemetry`      | asset_id, parquet_path, streams_present, sample_rates                                                                             | Pointer not blob. 10 Hz resampled for scoring + raw high-rate ACCL/GYRO for airtime                                                                            |
+| `classification` | asset_id, stage_version, is_mtb+conf, style, mount, **lighting**, trail_id+conf, quality_flags                                    | mount ∈ {chest, helmet}; lighting ∈ {day, twilight, night}                                                                                                     |
+| `score_series`   | asset_id, t, speed, turn, rough, air, descent, flow, composite                                                                    | 1 Hz; what the review UI draws                                                                                                                                 |
+| `segment`        | asset_id, t_in, t_out, features (jsonb), dominant_type, **subject**, rank, status                                                 | candidate → approved/rejected → rendered. `subject` names who's in it — `orbit`, not `dog_detected`, so the librarian answers questions the way you'd ask them |
+| `decision`       | segment_id, action, adjusted_in, adjusted_out, reason_chips, decided_at                                                           | **The training log.** Append-only                                                                                                                              |
+| `render`         | segment_id, preset, crop_path (jsonb), out_path, status, rendered_at                                                              | Crop path stored so a preset tweak doesn't redo tracking                                                                                                       |
+| `render_job`     | name, segment_ids (ordered), level, fps, status, step, done_s/total_s, out_path                                                    | What `cut` was asked to build. Disposable — the ids in order *are* the edit, and re-picking them rebuilds it                                                    |
+| `trail`          | id, name, geometry, region, source, difficulty                                                                                    | Local cache from OSM/Trailforks                                                                                                                                |
 
 ## Build order
 
@@ -1040,19 +1207,19 @@ Phase 5 itself is optional. At a handful of files per ride one machine keeps up 
 distribution is a throughput fix for a problem you may never have, worth building only if you
 take on a backlog.
 
-| Phase | Machines | Store | Orchestration | Models |
-|---|---|---|---|---|
-| 0 · 1 | M4 Max | SQLite | a script and a directory watcher | none |
-| 2 · 3 | M4 Max | SQLite | LangGraph + `SqliteSaver` | none |
-| 4 | M4 Max (+ desktop for training) | SQLite | LangGraph + `SqliteSaver` | RF-DETR · SigLIP · Sonnet 5 |
-| 5 | both | Postgres | + Redis · Celery · `AsyncPostgresSaver` | same, routed by queue |
+| Phase | Machines                        | Store    | Orchestration                           | Models                      |
+| ----- | ------------------------------- | -------- | --------------------------------------- | --------------------------- |
+| 0 · 1 | M4 Max                          | SQLite   | a script and a directory watcher        | none                        |
+| 2 · 3 | M4 Max                          | SQLite   | LangGraph + `SqliteSaver`               | none                        |
+| 4     | M4 Max (+ desktop for training) | SQLite   | LangGraph + `SqliteSaver`               | RF-DETR · SigLIP · Sonnet 5 |
+| 5     | both                            | Postgres | + Redis · Celery · `AsyncPostgresSaver` | same, routed by queue       |
 
 **SQLite carries you to phase 5**, not just through phase 0 — single machine, single writer, and
 LangGraph ships a SQLite checkpointer. Postgres arrives when a second machine does, and the
 migration is a schema dump. Running a database server for a script you invoke by hand is
 infrastructure maintained for nothing.
 
-Two phase-0 decisions *are* worth making with phase 5 in mind, both nearly free now and annoying
+Two phase-0 decisions _are_ worth making with phase 5 in mind, both nearly free now and annoying
 later:
 
 - **Write each step as a function that takes a path and returns a dict**, with a thin CLI wrapper.
@@ -1071,24 +1238,24 @@ ingest if laptop space is tight.
 
 - **Phase 0 (a weekend) — Ingest and inventory.** Hash, probe, telemetry → parquet, 540p proxy,
   IORI horizon-lock check. One machine, no queue.
-  *Ships: a table of every file you own.*
+  _Ships: a table of every file you own._
 - **Phase 1 (the critical one) — Telemetry scoring, visualized.** All sub-scores plus composite
   rendered as an overlay on the proxy. Also where chest/helmet classification gets built and
   validated. Tune on real footage. No ML yet.
-  *Ships: the answer to "does this score match what I think is exciting."*
+  _Ships: the answer to "does this score match what I think is exciting."_
 - **Phase 2 — Clip selection + review UI.** Peak-finding, NMS, diversity, local web app with
   decision logging.
-  *Ships: candidate clips, and the decision log starts filling.*
+  _Ships: candidate clips, and the decision log starts filling._
 - **Phase 3 — Render with a static crop.** Center crop to 9:16 from 8:7 source, IORI-gated
   horizon leveling, correct encode settings. This alone covers the solo/chest cell properly.
-  *Ships: actual Reels, end to end.*
+  _Ships: actual Reels, end to end._
 - **Phase 4 — Vision layer.** Is-it-MTB, dog detection, and the full four-cell reframe policy
-  with the smoothed crop path. Note chest/helmet detection does *not* need vision — it comes out
+  with the smoothed crop path. Note chest/helmet detection does _not_ need vision — it comes out
   of phase 1 — so this phase is really just the dog and the tracking.
-  *Ships: subject-aware vertical framing.*
+  _Ships: subject-aware vertical framing._
 - **Phase 5 — Distribute and learn.** Celery queues across three machines; fit scoring weights
   on the accumulated decision log.
-  *Ships: a system that gets better while you use it.*
+  _Ships: a system that gets better while you use it._
 
 ## Risks & open questions
 
@@ -1102,7 +1269,7 @@ ingest if laptop space is tight.
   Orbit around 5–15° depending on lead. The return should still dwarf anything diffuse in a
   near-black frame, but "should" is doing work there. Shoot one night ride, pull ten frames at
   varying lead, measure the actual luma separation between the harness and the next-brightest
-  object before building the threshold path around it. If the margin is thin, *then* add the LED.
+  object before building the threshold path around it. If the margin is thin, _then_ add the LED.
 - **MEDIUM — 8:7 modes cap at 5.3K30 and 4K60.** If you currently shoot 5.3K60 16:9, moving to
   8:7 means choosing between 5.3K30 and 4K60. For MTB, 4K60 8:7 is the better trade. Confirm on
   your own footage before committing the library to one mode.

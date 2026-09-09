@@ -94,16 +94,24 @@ orbitcut calibrate               # fit the 0-1 scale to your own library
 orbitcut rank                    # which rides are worth cutting from
 orbitcut overlay 0603            # watch a ride with its score curve drawn on
 
+orbitcut track                   # find Orbit, for subject-aware framing
 orbitcut clips                   # propose the clips
 orbitcut review                  # approve or reject them in a browser
 orbitcut log                     # what the decision log holds
 orbitcut fit                     # can a fitted model beat the hand-set weights?
 
 orbitcut level 0603              # what the horizon is doing, and what it costs
-orbitcut render                  # approved clips out as 9:16 Reels
+orbitcut cut                     # pick clips in a browser, queue the renders
+orbitcut render                  # every approved clip out as 9:16 Reels
+orbitcut shelf                   # what's finished, and a QR to get it on your phone
 ```
 
 `doctor`, `inventory`, `timing`, `bench` and `reel` fill in the corners.
+
+`render` and `cut` are the same stage from two ends. `render` takes everything
+approved and groups it by ride, in the order it happened, which is the right
+default and the wrong tool for making one post. `cut` is for the post: pick four
+clips from four rides, put them in the order you want, and queue it.
 
 ---
 
@@ -530,11 +538,82 @@ orbitcut log --restart decisions.json   # write, read back, verify, then clear
 
 ---
 
+## Cutting a post
+
+`orbitcut cut` opens the approved clips in a browser, plays them from the
+proxies, and renders whatever you pick from the originals:
+
+```
+j / k        move        space  pick this clip        c  clear the picks
+p            play the whole cut, in order, before rendering any of it
+r            replay      enter  queue it as one file
+                         shift-enter  queue each pick as its own file
+```
+
+Picks keep the order you made them in — that order is the edit — and the ✕ and
+arrows beside each one reorder or drop it. Renders land in
+`$ORBITCUT_ROOT/renders/cuts/`: a single clip as one file, a multi-clip cut as a
+folder holding the joined Reel and the parts it was made from, so a clip that
+turns out to stand on its own is already rendered.
+
+The queue is a table in SQLite, not a list in memory. A 30-second clip cut from
+a 5.3K HEVC original is most of a minute of decode — the trim happens inside the
+filter graph, so ffmpeg reads the file from the start to reach the in-point —
+and a four-clip cut is a coffee. Reloading the tab, or closing it, does not lose
+the queue; ✕ cancels a job and kills the encoder within a quarter of a second,
+and removes the half-written file rather than leaving something playable-looking
+in the renders folder.
+
+**Frame rates are normalised before anything is encoded.** This library is 52
+rides at 29.97 fps and 37 at 59.94, and stream-copying two of those together
+does not fail and does not come out short — it comes out variable-rate. Two
+two-second parts at 30 and 60 join into 180 frames over 4.02 s in a file that
+declares 60 fps and averages 45. Every check you can make locally passes; what
+happens to it is decided by Instagram's re-encode. So a cut that mixes rates
+renders every part at the faster one, and the UI says so before you queue it.
+
+---
+
+## Getting it onto the phone
+
+Instagram is posted from a phone and the renders are on the laptop.
+`orbitcut shelf` closes that gap: a page of every finished file — poster frame,
+length, size, shape — and beside each one a QR code. Point the phone camera at
+it, download over the house wifi, Share → Save Video, post.
+
+```bash
+orbitcut shelf                # gallery + QR codes, on your LAN address
+orbitcut shelf --local-only   # loopback only; no QR codes, nothing on the network
+```
+
+**This is the only part of OrbitCut that listens on the network, and it is
+deliberate.** A QR pointing at `127.0.0.1` points the phone at itself, so
+handing a file to another device means being reachable from it. The exposure is
+cut down to the job:
+
+- it binds **one interface** — the LAN address, never `0.0.0.0`, so loopback is
+  not even listening
+- every path lives under a random per-run token that is never written to disk
+  and dies with the process; without it every request is a 404
+- only files under `$ORBITCUT_ROOT/renders` are reachable, resolved and checked,
+  so a crafted URL cannot walk out into the originals
+- **GET only.** No endpoint here writes anything, to the database or to disk
+
+It is still your footage on your wifi. At home that is the point; on a café
+network use `--local-only` and a cable.
+
+The QR encoder is in-tree (`qr.py`) rather than a dependency — the format has
+not changed since 2000. It was built against `segno` and `zxing-cpp`, neither of
+which this project installs: matrices compared bit-for-bit for all ten versions
+at exact capacity, and every payload length from 1 to 213 bytes decoded back.
+
+---
+
 ## Layout
 
 ```
 $ORBITCUT_ROOT/
-  orbitcut.db                       SQLite: asset, segment, stage_run
+  orbitcut.db                       SQLite: asset, segment, stage_run, render_job
   calibration.json                  the 0-1 scale, fitted to your library
   derived/<content_hash>/
       proxy.mp4                     ~50 MB — what review and levelling read
@@ -543,7 +622,9 @@ $ORBITCUT_ROOT/
       imu_raw.parquet               ACCL and GYRO at native ~200 Hz
       scores.parquet                per-second features
       air_events.parquet            freefall windows
-  renders/<ride>/                   finished Reels
+  renders/<ride>/                   finished Reels, one folder per ride
+  renders/cuts/                     what `orbitcut cut` assembled by hand
+                                    (`orbitcut shelf` lists all of it)
   inbox/                            transient card offload
 ```
 
@@ -572,25 +653,34 @@ decorator, not a rewrite.
 | `score.py`       | Per-second features in raw physical units                             |
 | `calibrate.py`   | Corpus percentiles, availability buckets, the power-mean composite    |
 | `select.py`      | Grow clips from peaks, suppress neighbours, then diversify            |
-| `review.py`      | Loopback review UI with real HTTP Range support                       |
+| `review.py`      | Loopback review UI: approve, reject, nudge the edges                   |
+| `cut.py`         | Pick approved clips in a browser; the render queue behind it          |
+| `webui.py`       | What both browser tools need — loopback server, real HTTP Range        |
 | `fit.py`         | Fits weights on the decision log and checks whether they beat the hand-set ones |
 | `level.py`       | Horizon measurement, calibrated against the frames                    |
 | `render.py`      | 9:16 Reels from the originals                                         |
+| `shelf.py`       | Finished renders in a browser, and the LAN handoff to a phone         |
+| `qr.py`          | QR encoder, byte mode level M, versions 1-10                          |
 | `overlay.py`     | A ride with its score curve burned in                                 |
 | `reel.py`        | A ride's candidates back to back, for fast triage                     |
 | `bench.py`       | What limits proxy speed: disk, decode or encode                       |
 | `db.py`          | SQLite schema and helpers                                             |
 | `naming.py`      | Ride and chapter numbers out of GoPro's filenames                     |
-| `cli.py`         | All nineteen subcommands                                              |
+| `cli.py`         | All twenty-one subcommands                                            |
 
 ### Self-tests
 
-Two things here are checked by planting a known answer and seeing whether the
-code recovers it, because both have failure modes that look like success:
+Everything here is checked by planting a known answer and seeing whether the
+code recovers it, because every one of these has a failure mode that looks like
+success:
 
 ```bash
 python tools/level_selftest.py     # tilt planted in synthetic footage
 python tools/select_selftest.py    # clip boundaries on planted curves
+python tools/orient_selftest.py    # a white bar planted at the top of the frame,
+                                   # and whether the decoder can be stopped from rotating
+python tools/cut_selftest.py       # the queue, and joining across frame rates
+python tools/qr_selftest.py        # QR matrices, against externally-checked answers
 ```
 
 `tools/` also holds `gps_probe.py`, `verify_grade.py` (grade against a real GPX)
@@ -601,10 +691,19 @@ the dog pulling).
 
 ## Not built yet
 
-**Phase 4 — vision.** Is-it-mountain-biking, dog detection, and subject-aware
-reframing so the crop follows Orbit instead of sitting centred. The `Pull`
-sub-score waits on the same detector; `tools/pull_probe.py` established that the
-accelerometer cannot substitute for it.
+**Phase 4 — vision, the rest of it.** Subject-aware reframing is built:
+`orbitcut track` finds Orbit with a COCO-pretrained RF-DETR and
+`orbitcut render --frame subject` pans the crop to follow him. What is left is
+is-it-mountain-biking, the helmet/gaze cell of the reframe policy, and the
+`Pull` sub-score — which waits on the same detector, `tools/pull_probe.py`
+having established that the accelerometer cannot substitute for it.
+
+The detector is the honest weak point. Stock COCO weights find Orbit in 21-32%
+of sampled frames on ride 0598: precision is high once the geometric priors
+throw out the rider's own forearm, but recall is low, and it is low because a
+dog well down the trail is twenty-odd pixels wide in a 540p proxy. The
+architecture doc's fine-tune on ~200 labelled frames of Orbit is the fix, and
+the pipeline now in place is what makes harvesting those labels cheap.
 
 **Night.** The night calibration bucket, illumination gate and retroreflective
 detection are designed and have never run, because there is no night footage in

@@ -48,6 +48,12 @@ STAGE_VERSIONS = {
     # Selection is versioned too, so a change to clip growing or suppression can
     # be told from a change to the curve underneath it.
     "select": 1,
+    # Where Orbit is. Bump this when the detector, the band, the tiling or the
+    # priors change: all four decide what a box means, and a track made under
+    # one set of them is not comparable with a track made under another. The
+    # sample rate does not belong here — it is a flag, and `track.json` records
+    # what a given file was actually tracked at.
+    "track": 1,
 }
 
 # --- telemetry ---------------------------------------------------------------
