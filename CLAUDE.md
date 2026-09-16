@@ -83,6 +83,8 @@ orbitcut retime [--dry-run]           # true UTC start from the GPS clock
 orbitcut label [ASSET] --style bikejoring --mount chest
 orbitcut orient [ASSET] [--all]       # where the container disagrees with the accelerometer
 orbitcut relink DIR [--all] [--dry-run]
+orbitcut archive [ASSET] [--delete-inbox] [--dry-run]  # copy inbox originals to $ORBITCUT_ARCHIVE, verified
+orbitcut restore ASSET                # pull an archived original back for rendering
 
 orbitcut track [ASSET] [--hz N] [--size nano|small|medium] [--windows]
 orbitcut score [ASSET]                # per-second physics
@@ -298,8 +300,10 @@ specific numbers from real files rather than gesturing at "improved accuracy".
 
 - 97 assets, 49,247 scored seconds. 437 segments: 49 approved, 56 rejected, 332 unreviewed.
 - Weights in force: `speed 0.0 / turn 0.15 / rough 0.85`, sharpness **2**.
-- All originals are still in `inbox/`. The `archive` stage is **not built** — `archived_path` is
-  null everywhere. Write it before you need it, and never let it delete on a transfer exit code.
+- The `archive`/`restore` stages are built (`orbitcut/archive.py`). All 97 originals are still
+  physically in `inbox/` — a dry run confirmed all 97 already have a verified copy on the passport
+  drive (`orbit-bikejoring`), so `archived_path` can be backfilled with zero copying, but nothing
+  has actually run `orbitcut archive --delete-inbox` yet to clear the inbox and fill it in.
 - Mount is no longer single-valued: 20 helmet files against 77 chest, which corresponds exactly
   to container rotation 0 vs 180. That split is also what made the upside-down render look
   intermittent — only the 77 were affected.

@@ -11,6 +11,7 @@ ROOT = Path(os.environ.get("ORBITCUT_ROOT", Path.home() / "orbitcut")).expanduse
 INBOX = ROOT / "inbox"  # transient: fresh offload, cleared by archive
 DERIVED = ROOT / "derived"  # keyed by content hash — proxy, telemetry, thumbs
 RENDERS = ROOT / "renders"  # finished clips
+RESTORED = ROOT / "restored"  # local working copies pulled back from the archive for rendering
 DB_PATH = Path(os.environ.get("ORBITCUT_DB", ROOT / "orbitcut.db")).expanduser()
 
 # Archive destination. Empty until you mount the desktop share.
@@ -77,7 +78,7 @@ VIDEO_SUFFIXES = {".mp4", ".MP4", ".mov", ".MOV", ".lrv", ".LRV"}
 
 
 def ensure_dirs() -> None:
-    for d in (ROOT, INBOX, DERIVED, RENDERS):
+    for d in (ROOT, INBOX, DERIVED, RENDERS, RESTORED):
         d.mkdir(parents=True, exist_ok=True)
 
 

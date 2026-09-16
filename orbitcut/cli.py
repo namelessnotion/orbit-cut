@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-from . import (calibrate as cal_mod, config, db, hashing, ingest, overlay as ov_mod,
-               probe as probe_mod, score as score_mod, telemetry as tel_mod)
+from . import (archive as arch_mod, calibrate as cal_mod, config, db, hashing, ingest,
+               overlay as ov_mod, probe as probe_mod, score as score_mod, telemetry as tel_mod)
 
 
 # Clip length the ranking assumes, in seconds. Stage 3 targets 7-20 s biased to
@@ -1241,11 +1242,10 @@ def cmd_relink(args) -> int:
 
     `source_path` is where a file was when it was ingested, and for this library
     that was `inbox/` — which the design describes as transient card offload.
-    The originals were moved somewhere else and nothing recorded where, because
-    the `archive` stage that exists to write `archived_path` was never built. So
-    the catalog knows everything about 97 rides except how to open one, and
-    `render` — which reads the original, never the proxy — has nothing to work
-    with.
+    This is for the case `archive`/`restore` don't cover: a file moved by hand,
+    outside that flow, with nothing recording where it went. So the catalog
+    knows everything about a ride except how to open it, and `render` — which
+    reads the original, never the proxy — has nothing to work with.
 
     The way back is the content hash. It is sampled rather than full-file, so
     re-identifying a library costs three 8 MiB reads per file instead of
@@ -1303,6 +1303,98 @@ def cmd_relink(args) -> int:
         print("  The missing ones are on a drive this scan did not cover, or gone.")
         print("  Nothing else in the catalog depends on them — proxies, telemetry")
         print("  and every decision you made are keyed on the hash, not the path.")
+    return 0
+
+
+def cmd_archive(args) -> int:
+    """Copy inbox originals to the archive drive, verify, record, reclaim.
+
+    Copy, re-hash at the destination, record `archived_path` — then, only if
+    asked, delete the local copy. Deletion is opt-in via `--delete-inbox`
+    every time, on purpose: this is the one command in the pipeline whose
+    mistake is unrecoverable, and every other command here is free to re-run.
+    """
+    if not config.ARCHIVE:
+        print("  ORBITCUT_ARCHIVE is not set — refusing to guess where the "
+              "archive drive is.\n  export ORBITCUT_ARCHIVE=/Volumes/.../orbit-bikejoring")
+        return 1
+    archive_root = Path(config.ARCHIVE).expanduser()
+    if not archive_root.exists():
+        print(f"  not found: {archive_root} — is the drive mounted?")
+        return 1
+
+    conn = db.connect()
+    if args.asset:
+        row = _find(conn, args.asset)
+        if row is None:
+            return 1
+        rows = [row]
+    else:
+        rows = [a for a in db.assets(conn)
+                if a["source_path"] and Path(a["source_path"]).exists()
+                and str(Path(a["source_path"])).startswith(str(config.INBOX))
+                and not db.stage_done(conn, a["content_hash"], "archive")]
+    if not rows:
+        print("  nothing in the inbox needs archiving")
+        return 0
+
+    print(f"  indexing {archive_root} ...", end="", flush=True)
+    existing = arch_mod.index_archive(archive_root)
+    print(f"\r  {len(existing)} file(s) already on the archive drive\n")
+
+    copied = present = errored = deleted = 0
+    for a in rows:
+        ch, source = a["content_hash"], Path(a["source_path"])
+        was_present = ch in existing
+        if args.dry_run:
+            print(f"  {a['filename']:<18} "
+                  + ("already archived" if was_present else "would copy"))
+            continue
+
+        started = db.now()
+        try:
+            result = arch_mod.archive_one(source, ch, archive_root, existing)
+        except (OSError, RuntimeError) as exc:
+            db.record_stage(conn, ch, "archive", "error", started, str(exc))
+            print(f"  ! {a['filename']}: {exc}")
+            errored += 1
+            continue
+
+        db.upsert_asset(conn, ch, archived_path=result["archived_path"],
+                        archived_at=result["archived_at"], source_path=result["archived_path"])
+        db.record_stage(conn, ch, "archive", "ok", started)
+        present += was_present
+        copied += not was_present
+        note = "already there" if was_present else "copied"
+        print(f"  {a['filename']:<18} -> {result['archived_path']}  ({note})")
+
+        if args.delete_inbox:
+            source.unlink()
+            deleted += 1
+
+    if args.dry_run:
+        print(f"\n  {len(rows)} asset(s) (dry run — nothing written)")
+        return 0
+
+    print(f"\n  archived {copied + present}: {copied} copied, {present} already on "
+          f"the drive, {errored} error(s)"
+          + (f", {deleted} removed from inbox" if deleted else ""))
+    return 1 if errored else 0
+
+
+def cmd_restore(args) -> int:
+    """Copy an archived original back locally so it can be rendered."""
+    conn = db.connect()
+    row = _find(conn, args.asset)
+    if row is None:
+        return 1
+    try:
+        path = arch_mod.ensure_original(conn, dict(row))
+    except RuntimeError as exc:
+        print(f"  {exc}")
+        return 1
+    already = str(path) == row["source_path"]
+    print(f"  {row['filename']}: {path}" + ("  (already there)" if already else "  (restored)"))
     return 0
 
 
@@ -1879,10 +1971,17 @@ def cmd_render(args) -> int:
     rides: dict[str, list] = {}
     for s in segs:
         a = assets.get(s["content_hash"])
-        if not a or not a["source_path"] or not Path(a["source_path"]).exists():
-            print(f"  ! original missing for {a['filename'] if a else s['content_hash']}"
+        if not a:
+            print(f"  ! original missing for {s['content_hash']}"
                   f" — skipped (rendering needs the original, not the proxy)")
             continue
+        try:
+            resolved = arch_mod.ensure_original(conn, dict(a))
+        except RuntimeError as exc:
+            print(f"  ! {a['filename']}: {exc}")
+            continue
+        a = dict(a)
+        a["source_path"] = str(resolved)
         rides.setdefault(a["ride_id"] or s["content_hash"][:8], []).append((s, a))
     for v in rides.values():
         v.sort(key=lambda sa: ((sa[1]["chapter"] or 0), sa[0]["t_in"]))
@@ -2163,6 +2262,20 @@ def main(argv: list[str] | None = None) -> int:
                    help="re-check every asset, not only the ones whose path is broken")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_relink)
+
+    p = sub.add_parser("archive", help="copy inbox originals to the archive drive, "
+                                       "verify, and record where they live")
+    p.add_argument("asset", nargs="?",
+                   help="hash prefix, filename, or ride number — default: every "
+                        "eligible inbox file")
+    p.add_argument("--delete-inbox", action="store_true",
+                   help="remove the local copy once the archive copy is verified")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_archive)
+
+    p = sub.add_parser("restore", help="copy an archived original back locally for rendering")
+    p.add_argument("asset", help="hash prefix, filename, or ride number")
+    p.set_defaults(fn=cmd_restore)
 
     p = sub.add_parser("label", help="record style and mount by hand")
     p.add_argument("asset", nargs="?", help="limit to one ride; default is all")

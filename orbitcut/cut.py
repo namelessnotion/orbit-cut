@@ -38,7 +38,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from . import config, db, render as rn, webui
+from . import archive as arch_mod, config, db, render as rn, webui
 
 CUTS = "cuts"               # under $ORBITCUT_ROOT/renders
 POLL_S = 0.4                # how often the worker looks for a new job
@@ -228,19 +228,17 @@ class Worker(threading.Thread):
         items = []
         for sid in ids:
             row = conn.execute(
-                """SELECT s.*, a.source_path, a.telemetry_path, a.proxy_path, a.track_path,
-                          a.filename, a.ride_id, a.fps
+                """SELECT s.*, a.source_path, a.archived_path, a.telemetry_path,
+                          a.proxy_path, a.track_path, a.filename, a.ride_id, a.fps
                      FROM segment s JOIN asset a ON a.content_hash = s.content_hash
                     WHERE s.id = ?""", (sid,)).fetchone()
             if row is None:
                 raise RuntimeError(f"segment {sid} is gone")
-            if not row["source_path"] or not Path(row["source_path"]).exists():
-                raise RuntimeError(
-                    f"the original for {row['filename']} is not where the catalog "
-                    f"says — rendering needs it, not the proxy. Try `orbitcut relink`")
+            seg = dict(row)
+            seg["source_path"] = str(arch_mod.ensure_original(conn, seg))
             t_in = row["t_in_user"] if row["t_in_user"] is not None else row["t_in"]
             t_out = row["t_out_user"] if row["t_out_user"] is not None else row["t_out"]
-            items.append({"seg": row, "t_in": t_in, "t_out": t_out,
+            items.append({"seg": seg, "t_in": t_in, "t_out": t_out,
                           "dur": t_out - t_in})
         if not items:
             raise RuntimeError("nothing selected")

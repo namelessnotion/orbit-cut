@@ -88,6 +88,8 @@ orbitcut verify GX010123.MP4     # one file, in detail — run this first
 orbitcut ingest ~/footage/       # hash, probe, telemetry, proxy, thumbs
 orbitcut retime                  # true recording times from the GPS clock
 orbitcut label --style bikejoring --mount chest
+orbitcut archive                 # copy inbox originals to the archive drive, verified
+orbitcut restore GX010123        # pull one original back, if render needs it later
 
 orbitcut score                   # per-second features from the sensors
 orbitcut calibrate               # fit the 0-1 scale to your own library
@@ -625,7 +627,8 @@ $ORBITCUT_ROOT/
   renders/<ride>/                   finished Reels, one folder per ride
   renders/cuts/                     what `orbitcut cut` assembled by hand
                                     (`orbitcut shelf` lists all of it)
-  inbox/                            transient card offload
+  inbox/                            transient card offload, cleared by `archive`
+  restored/                         originals pulled back from the archive for rendering
 ```
 
 Derived data is keyed by content hash, so you can rename and reorganise ride
@@ -650,6 +653,7 @@ decorator, not a rewrite.
 | `proxy.py`       | ffmpeg with a hardware-decode path and a software fallback            |
 | `thumbs.py`      | 5×3 contact sheet from the proxy                                      |
 | `ingest.py`      | Orchestration and idempotency                                         |
+| `archive.py`     | Copies originals to the archive drive and back, verified by hash      |
 | `score.py`       | Per-second features in raw physical units                             |
 | `calibrate.py`   | Corpus percentiles, availability buckets, the power-mean composite    |
 | `select.py`      | Grow clips from peaks, suppress neighbours, then diversify            |
@@ -681,6 +685,8 @@ python tools/orient_selftest.py    # a white bar planted at the top of the frame
                                    # and whether the decoder can be stopped from rotating
 python tools/cut_selftest.py       # the queue, and joining across frame rates
 python tools/qr_selftest.py        # QR matrices, against externally-checked answers
+python tools/archive_selftest.py   # copy/verify/restore never leaves a corrupt file
+                                   # at a name that looks like a good one
 ```
 
 `tools/` also holds `gps_probe.py`, `verify_grade.py` (grade against a real GPX)
@@ -709,7 +715,3 @@ the pipeline now in place is what makes harvesting those labels cheap.
 detection are designed and have never run, because there is no night footage in
 the library to run them against. The MEDIUM risk on retroreflective return at
 bikejoring distances is fully open.
-
-**`archive`** — copy the original to the desktop, **re-hash at the destination**,
-record `archived_path`, then delete the local copy. Never let it delete on a
-transfer's exit code alone.
